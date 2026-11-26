@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using Microsoft.Win32;
 
 namespace AudioProfileSwitcher;
@@ -28,15 +29,16 @@ public sealed class MainForm : Form
     private readonly FlowLayoutPanel _cardsPanel;
     private readonly TableLayoutPanel _emptyPanel;
     private readonly Panel _settingsPanel;
-    private readonly Label _nowOut;
-    private readonly Label _nowIn;
+    private readonly LiveNowPanel _liveNow;
     private readonly Label _statusLabel;
-    private readonly Button _gearBtn;
-    private readonly Dictionary<HotKeyTarget, Button> _hkButtons = new();
+    private readonly Panel _statusDot;
+    private readonly ModernButton _gearBtn;
+    private readonly Dictionary<HotKeyTarget, ModernButton> _hkButtons = new();
     private Label _jumpLabel = null!;
     private DarkCombo _fallbackCombo = null!;
     private DarkCombo _muteBannerPosCombo = null!;
-    private Button _checkUpdateBtn = null!;
+    private ModernButton _checkUpdateBtn = null!;
+    private Color _statusDotColor = Theme.Success;
 
     // Auto-activate debounce & flapping guard
     private readonly HashSet<Guid> _pendingNewDevices = new();
@@ -65,6 +67,16 @@ public sealed class MainForm : Form
         public override string ToString() => Label;
     }
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW for crisp depth on Windows 10 & 11
+            return cp;
+        }
+    }
+
     public MainForm(bool startMinimized = false)
     {
         _startMinimized = startMinimized;
@@ -77,9 +89,9 @@ public sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "AudioSwitcher";
         Icon = TrayIcons.AppWindow;
-        MinimumSize = new Size(380, 420);
-        MaximumSize = new Size(380, 1400);
-        Size = new Size(380, ProfileLogic.ClampWindowHeight(_config.WindowHeight, 420, 1400, 620));
+        MinimumSize = new Size(396, 440);
+        MaximumSize = new Size(396, 1400);
+        Size = new Size(396, ProfileLogic.ClampWindowHeight(_config.WindowHeight, 440, 1400, 648));
         FormBorderStyle = FormBorderStyle.None;
         RestoreWindowLocation();
         BackColor = Theme.BgMain;
@@ -87,74 +99,64 @@ public sealed class MainForm : Form
         Padding = new Padding(1);
         DoubleBuffered = true;
 
-        // ---- title bar ----
-        var titleBar = new Panel { Dock = DockStyle.Top, Height = 44, BackColor = Theme.BgMain };
-        var titleLbl = new Label
+        // ---- modern title bar with vector emblem + version pill ----
+        var titleBar = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Theme.BgMain };
+        titleBar.Paint += (_, e) =>
         {
-            Text = $"AUDIO SWITCHER  v{AppInfo.Version}",
-            Font = Theme.Header,
-            ForeColor = Theme.TextMuted,
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(16, 0, 0, 0)
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float k = Math.Max(1f, titleBar.DeviceDpi / 96f);
+            int P(int v) => (int)Math.Round(v * k);
+
+            var emblem = new RectangleF(P(16), (titleBar.Height - P(22)) / 2f, P(22), P(22));
+            Gfx.DrawAppEmblem(g, emblem);
+
+            int titleX = P(46);
+            var titleRect = new Rectangle(titleX, 0, P(124), titleBar.Height);
+            TextRenderer.DrawText(g, "AudioSwitcher", Theme.Title, titleRect, Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+            var measured = TextRenderer.MeasureText(g, "AudioSwitcher", Theme.Title);
+            var verRect = new Rectangle(titleX + measured.Width + P(2), (titleBar.Height - P(18)) / 2, P(44), P(18));
+            using var vp = Gfx.RoundRect(verRect, P(9));
+            using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
+            TextRenderer.DrawText(g, $"v{AppInfo.Version}", Theme.MicroBold, verRect, Theme.AccentEnd,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         };
-        MouseEventHandler drag = (_, e) =>
+        titleBar.MouseDown += (_, e) =>
         {
             if (e.Button != MouseButtons.Left) return;
             Native.DragWindow(Handle);
             CaptureWindowBounds(persist: true);
         };
-        titleBar.MouseDown += drag;
-        titleLbl.MouseDown += drag;
 
-        _gearBtn = MakeIconButton(Theme.Glyph("\uE713", "⚙"), "Settings & hotkeys", (_, _) => ToggleSettings(), Theme.BgCardHover);
-        var minBtn = MakeIconButton(Theme.Glyph("\uE921", "—"), "Minimize", (_, _) => WindowState = FormWindowState.Minimized, Theme.BgCardHover);
-        var closeBtn = MakeIconButton(Theme.Glyph("\uE8BB", "×"), "Hide to tray (keeps running)", (_, _) => HideToTray(), Theme.Danger);
-        titleBar.Controls.Add(titleLbl);
+        _gearBtn = MakeIconButton(Theme.Glyph("\uE713", "⚙"), "Settings & hotkeys", (_, _) => ToggleSettings(), ModernButtonKind.Ghost);
+        var minBtn = MakeIconButton(Theme.Glyph("\uE921", "—"), "Minimize", (_, _) => WindowState = FormWindowState.Minimized, ModernButtonKind.Ghost);
+        var closeBtn = MakeIconButton(Theme.Glyph("\uE8BB", "×"), "Hide to tray (keeps running)", (_, _) => HideToTray(), ModernButtonKind.DangerGhost);
         titleBar.Controls.Add(_gearBtn);
         titleBar.Controls.Add(minBtn);
         titleBar.Controls.Add(closeBtn);
 
-        // ---- live "now" panel ----
-        var nowPanel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 58,
-            ColumnCount = 2,
-            RowCount = 2,
-            BackColor = Theme.BgMain,
-            Padding = new Padding(16, 2, 16, 6)
-        };
-        nowPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));
-        nowPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        nowPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        nowPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        nowPanel.Controls.Add(MakeTag("OUT"), 0, 0);
-        nowPanel.Controls.Add(_nowOut = MakeNowLabel(), 1, 0);
-        nowPanel.Controls.Add(MakeTag("IN"), 0, 1);
-        nowPanel.Controls.Add(_nowIn = MakeNowLabel(), 1, 1);
+        // ---- elevated live "now" hero panel (clickable mic mute row) ----
+        _liveNow = new LiveNowPanel { Dock = DockStyle.Top, Height = 76 };
+        _liveNow.MicMuteToggleRequested += () => _ = ToggleMicMuteAsync();
+        _tip.SetToolTip(_liveNow, "Active audio devices · click the mic row to toggle mute");
 
         // ---- action bar ----
-        var actionBar = new FlowLayoutPanel
+        var actionBar = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 40,
+            Height = 46,
             BackColor = Theme.BgMain,
-            Padding = new Padding(16, 4, 16, 4),
-            WrapContents = false
+            Padding = new Padding(16, 6, 16, 6)
         };
-        var addBtn = new Button
+        var addBtn = new ModernButton(ModernButtonKind.Primary)
         {
-            Text = "+ New Card",
-            Font = Theme.BodyBold,
-            ForeColor = Theme.TextPrimary,
-            BackColor = Theme.Accent,
-            FlatStyle = FlatStyle.Flat,
-            Size = new Size(110, 30),
-            Margin = new Padding(0, 0, 12, 0),
-            Cursor = Cursors.Hand
+            Text = "+  New Card",
+            Size = new Size(116, 32),
+            Location = new Point(16, 7),
+            CornerRadius = 8
         };
-        addBtn.FlatAppearance.BorderSize = 0;
         addBtn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
         var hintLbl = new Label
         {
@@ -162,7 +164,7 @@ public sealed class MainForm : Form
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
             AutoSize = true,
-            Margin = new Padding(0, 8, 0, 0)
+            Location = new Point(144, 15)
         };
         actionBar.Controls.Add(addBtn);
         actionBar.Controls.Add(hintLbl);
@@ -175,7 +177,7 @@ public sealed class MainForm : Form
             WrapContents = false,
             AutoScroll = true,
             BackColor = Theme.BgMain,
-            Padding = new Padding(16, 4, 16, 8),
+            Padding = new Padding(16, 4, 16, 10),
             AllowDrop = true,
             Visible = false
         };
@@ -195,8 +197,11 @@ public sealed class MainForm : Form
         _cardsPanel.Paint += (_, e) =>
         {
             if (_dropLineY < 0) return;
-            using var pen = new Pen(Theme.Accent, 2);
-            e.Graphics.DrawLine(pen, _cardsPanel.Padding.Left, _dropLineY, _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Right, _dropLineY);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int x1 = _cardsPanel.Padding.Left;
+            int x2 = _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Right;
+            using var pen = new Pen(Theme.AccentEnd, 2.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            e.Graphics.DrawLine(pen, x1, _dropLineY, x2, _dropLineY);
         };
 
         _emptyPanel = BuildEmptyPanel();
@@ -207,24 +212,47 @@ public sealed class MainForm : Form
         content.Controls.Add(_emptyPanel);
         content.Controls.Add(_settingsPanel);
 
-        // ---- status bar + vertical resize grip ----
+        // ---- sleek footer bar with live status dot & resize grip pill ----
         var footerBar = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 28,
-            BackColor = Theme.BgCard
+            Height = 32,
+            BackColor = Theme.BgSurface
+        };
+        footerBar.Paint += (_, e) =>
+        {
+            using var p = new Pen(Theme.BgBorder, 1f);
+            e.Graphics.DrawLine(p, 0, 0, footerBar.Width, 0);
         };
 
-        var resizeGrip = new Label
+        _statusDot = new Panel
         {
-            Text = "⋯",
-            Font = Theme.BodyBold,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgCard,
+            Dock = DockStyle.Left,
+            Width = 24,
+            BackColor = Theme.BgSurface
+        };
+        _statusDot.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int d = 6;
+            using var b = new SolidBrush(_statusDotColor);
+            e.Graphics.FillEllipse(b, 14, (_statusDot.Height - d) / 2, d, d);
+        };
+
+        var resizeGrip = new Panel
+        {
             Dock = DockStyle.Right,
-            Width = 28,
-            TextAlign = ContentAlignment.MiddleCenter,
+            Width = 34,
+            BackColor = Theme.BgSurface,
             Cursor = Cursors.SizeNS
+        };
+        resizeGrip.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var p = new Pen(Theme.BgBorderStrong, 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            int cy = resizeGrip.Height / 2;
+            e.Graphics.DrawLine(p, 8, cy - 2, 22, cy - 2);
+            e.Graphics.DrawLine(p, 11, cy + 2, 19, cy + 2);
         };
         _tip.SetToolTip(resizeGrip, "Drag up or down to resize window height");
         AttachVerticalResize(resizeGrip);
@@ -234,31 +262,39 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgCard,
+            BackColor = Theme.BgSurface,
             TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(16, 0, 4, 0),
+            Padding = new Padding(2, 0, 4, 0),
             AutoEllipsis = true,
             Text = "Ready"
         };
-        _statusTimer.Tick += (_, _) => { _statusTimer.Stop(); _statusLabel.Text = "Ready"; _statusLabel.ForeColor = Theme.TextMuted; };
+        _statusTimer.Tick += (_, _) =>
+        {
+            _statusTimer.Stop();
+            _statusLabel.Text = "Ready";
+            _statusLabel.ForeColor = Theme.TextMuted;
+            _statusDotColor = Theme.Success;
+            _statusDot.Invalidate();
+        };
 
         var bottomResizeStrip = new Panel
         {
             Dock = DockStyle.Bottom,
             Height = 4,
-            BackColor = Theme.BgCard,
+            BackColor = Theme.BgSurface,
             Cursor = Cursors.SizeNS
         };
         AttachVerticalResize(bottomResizeStrip);
 
         footerBar.Controls.Add(_statusLabel);
+        footerBar.Controls.Add(_statusDot);
         footerBar.Controls.Add(resizeGrip);
         footerBar.Controls.Add(bottomResizeStrip);
 
         Controls.Add(content);
         Controls.Add(footerBar);
         Controls.Add(actionBar);
-        Controls.Add(nowPanel);
+        Controls.Add(_liveNow);
         Controls.Add(titleBar);
 
         // ---- mute banner interactive wiring ----
@@ -463,12 +499,13 @@ public sealed class MainForm : Form
     {
         base.OnHandleCreated(e);
         Native.RoundCorners(Handle);
+        Native.SetBorderColor(Handle, Theme.BgBorderStrong);
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        using var pen = new Pen(Theme.BgBorder, 1);
+        using var pen = new Pen(Theme.BgBorder, 1f);
         e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
     }
 
@@ -546,7 +583,9 @@ public sealed class MainForm : Form
     private void SetStatus(string text, bool warning)
     {
         _statusLabel.Text = text;
-        _statusLabel.ForeColor = warning ? Theme.Warning : Theme.TextMuted;
+        _statusLabel.ForeColor = warning ? Theme.Warning : Theme.TextSoft;
+        _statusDotColor = warning ? Theme.Warning : Theme.AccentEnd;
+        _statusDot.Invalidate();
         _statusTimer.Stop();
         _statusTimer.Start();
     }
@@ -555,46 +594,19 @@ public sealed class MainForm : Form
     // UI builders
     // =========================================================================================
 
-    private Button MakeIconButton(string glyph, string tip, EventHandler onClick, Color hover)
+    private ModernButton MakeIconButton(string glyph, string tip, EventHandler onClick, ModernButtonKind kind)
     {
-        var btn = new Button
+        var btn = new ModernButton(kind)
         {
             Text = glyph,
-            Font = Theme.IconFont,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgMain,
-            FlatStyle = FlatStyle.Flat,
             Dock = DockStyle.Right,
-            Width = 40,
-            Cursor = Cursors.Hand,
-            TabStop = false
+            Width = 38,
+            BackColor = Theme.BgMain
         };
-        btn.FlatAppearance.BorderSize = 0;
-        btn.FlatAppearance.MouseOverBackColor = hover;
-        btn.FlatAppearance.MouseDownBackColor = hover;
         btn.Click += onClick;
         _tip.SetToolTip(btn, tip);
         return btn;
     }
-
-    private static Label MakeTag(string text) => new()
-    {
-        Text = text,
-        Font = Theme.SmallBold,
-        ForeColor = Theme.TextMuted,
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleLeft
-    };
-
-    private static Label MakeNowLabel() => new()
-    {
-        Font = Theme.BodyBold,
-        ForeColor = Theme.TextPrimary,
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleLeft,
-        AutoEllipsis = true,
-        Text = "—"
-    };
 
     private TableLayoutPanel BuildEmptyPanel()
     {
@@ -602,42 +614,49 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             BackColor = Theme.BgMain,
             Visible = false
         };
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        t.RowStyles.Add(new RowStyle(SizeType.Percent, 35));
+        t.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.Percent, 65));
+        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        t.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
+
+        var emblem = new Panel { Size = new Size(64, 64), BackColor = Theme.BgMain, Anchor = AnchorStyles.None, Margin = new Padding(0, 0, 0, 12) };
+        emblem.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var halo = new SolidBrush(Theme.AccentSoft);
+            e.Graphics.FillEllipse(halo, 2, 2, 60, 60);
+            Gfx.DrawAppEmblem(e.Graphics, new RectangleF(10, 10, 44, 44));
+        };
 
         var lbl = new Label
         {
-            Text = "No cards yet.\nA card remembers an output + input pair, so one click or hotkey switches both.",
+            Text = "No profile cards yet\nPair an output, microphone & volume so one click or hotkey switches everything.",
             Font = Theme.Body,
             ForeColor = Theme.TextMuted,
             AutoSize = false,
-            Size = new Size(300, 70),
+            Size = new Size(310, 66),
             TextAlign = ContentAlignment.MiddleCenter,
             Anchor = AnchorStyles.None
         };
-        var btn = new Button
+        var btn = new ModernButton(ModernButtonKind.Primary)
         {
             Text = "Create card from current devices",
-            Font = Theme.BodyBold,
-            ForeColor = Theme.TextPrimary,
-            BackColor = Theme.Accent,
-            FlatStyle = FlatStyle.Flat,
-            Size = new Size(240, 34),
+            Size = new Size(256, 38),
             Anchor = AnchorStyles.None,
-            Cursor = Cursors.Hand
+            CornerRadius = 10,
+            Margin = new Padding(0, 8, 0, 0)
         };
-        btn.FlatAppearance.BorderSize = 0;
         btn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
 
-        t.Controls.Add(lbl, 0, 1);
-        t.Controls.Add(btn, 0, 2);
+        t.Controls.Add(emblem, 0, 1);
+        t.Controls.Add(lbl, 0, 2);
+        t.Controls.Add(btn, 0, 3);
         return t;
     }
 
@@ -646,42 +665,46 @@ public sealed class MainForm : Form
         var panel = new Panel
         {
             Dock = DockStyle.Fill,
-            BackColor = Theme.BgCard,
-            Padding = new Padding(16, 8, 16, 12),
+            BackColor = Theme.BgMain,
+            Padding = new Padding(16, 4, 16, 12),
             AutoScroll = true,
             Visible = false
         };
 
-        var t = new TableLayoutPanel
+        var stack = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            ColumnCount = 2,
-            BackColor = Theme.BgCard
+            ColumnCount = 1,
+            BackColor = Theme.BgMain
         };
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 152));
+        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        AddHeader(t, "GLOBAL HOTKEYS (CLICK TO REBIND)");
-        AddHotKeyRow(t, "Cycle Cards", HotKeyTarget.Card);
-        AddHotKeyRow(t, "Cycle Output", HotKeyTarget.Output);
-        AddHotKeyRow(t, "Cycle Input", HotKeyTarget.Input);
-        AddHotKeyRow(t, "Toggle Mic Mute", HotKeyTarget.Mute);
-        AddHotKeyRow(t, "Show / Hide Window", HotKeyTarget.ToggleWindow);
+        // ---- Section 1: Global Hotkeys ----
+        var hkGrid = MakeSectionGrid();
+        AddSectionTitle(hkGrid, "GLOBAL HOTKEYS  ·  CLICK TO REBIND");
+        AddHotKeyRow(hkGrid, "Cycle Cards", HotKeyTarget.Card);
+        AddHotKeyRow(hkGrid, "Cycle Output", HotKeyTarget.Output);
+        AddHotKeyRow(hkGrid, "Cycle Input", HotKeyTarget.Input);
+        AddHotKeyRow(hkGrid, "Toggle Mic Mute", HotKeyTarget.Mute);
+        AddHotKeyRow(hkGrid, "Show / Hide Window", HotKeyTarget.ToggleWindow);
 
         _jumpLabel = MakeRowLabel("", 36);
-        t.Controls.Add(_jumpLabel);
-        t.Controls.Add(NewToggle(_config.JumpHotKeysEnabled, on =>
+        hkGrid.Controls.Add(_jumpLabel);
+        hkGrid.Controls.Add(NewToggle(_config.JumpHotKeysEnabled, on =>
         {
             _config.JumpHotKeysEnabled = on;
             Save();
             RegisterAllHotKeys();
             RefreshCardSlots();
         }));
+        stack.Controls.Add(WrapSectionCard(hkGrid));
 
-        AddHeader(t, "BEHAVIOR & AUDIO CUES");
-        t.Controls.Add(MakeRowLabel("Fallback on disconnect", 34));
-        _fallbackCombo = new DarkCombo { Size = new Size(146, 24), Anchor = AnchorStyles.Right };
+        // ---- Section 2: Behavior & Audio Cues ----
+        var behGrid = MakeSectionGrid();
+        AddSectionTitle(behGrid, "BEHAVIOR & AUDIO CUES");
+        behGrid.Controls.Add(MakeRowLabel("Fallback on disconnect", 34));
+        _fallbackCombo = new DarkCombo { Size = new Size(146, 26), Anchor = AnchorStyles.Right };
         _fallbackCombo.SelectedIndexChanged += (_, _) =>
         {
             if (_updatingFallbackCombo || _fallbackCombo.SelectedItem is not FallbackChoice choice) return;
@@ -690,25 +713,28 @@ public sealed class MainForm : Form
             Save();
             RefreshCardStates();
         };
-        t.Controls.Add(_fallbackCombo);
+        behGrid.Controls.Add(_fallbackCombo);
 
-        t.Controls.Add(MakeRowLabel("Play chime on profile / device switch", 32));
-        t.Controls.Add(NewToggle(_config.ChimeEnabled, on => { _config.ChimeEnabled = on; Save(); }));
+        behGrid.Controls.Add(MakeRowLabel("Play chime on profile / device switch", 32));
+        behGrid.Controls.Add(NewToggle(_config.ChimeEnabled, on => { _config.ChimeEnabled = on; Save(); }));
 
-        t.Controls.Add(MakeRowLabel("Play chime on mic mute / unmute", 32));
-        t.Controls.Add(NewToggle(_config.MuteChimeEnabled, on => { _config.MuteChimeEnabled = on; Save(); }));
+        behGrid.Controls.Add(MakeRowLabel("Play chime on mic mute / unmute", 32));
+        behGrid.Controls.Add(NewToggle(_config.MuteChimeEnabled, on => { _config.MuteChimeEnabled = on; Save(); }));
+        stack.Controls.Add(WrapSectionCard(behGrid));
 
-        AddHeader(t, "MIC MUTE OVERLAY");
-        t.Controls.Add(MakeRowLabel("Show persistent MIC MUTED banner", 32));
-        t.Controls.Add(NewToggle(_config.MuteBannerEnabled, on =>
+        // ---- Section 3: Mic Mute Overlay ----
+        var muteGrid = MakeSectionGrid();
+        AddSectionTitle(muteGrid, "MIC MUTE OVERLAY");
+        muteGrid.Controls.Add(MakeRowLabel("Show persistent MIC MUTED banner", 32));
+        muteGrid.Controls.Add(NewToggle(_config.MuteBannerEnabled, on =>
         {
             _config.MuteBannerEnabled = on;
             Save();
             ApplyMuteUi(_micMuted);
         }));
 
-        t.Controls.Add(MakeRowLabel("Interactive banner (drag / click to unmute)", 32));
-        t.Controls.Add(NewToggle(_config.MuteBannerInteractive, on =>
+        muteGrid.Controls.Add(MakeRowLabel("Interactive banner (drag / click to unmute)", 32));
+        muteGrid.Controls.Add(NewToggle(_config.MuteBannerInteractive, on =>
         {
             _config.MuteBannerInteractive = on;
             _muteBanner.Interactive = on;
@@ -716,8 +742,8 @@ public sealed class MainForm : Form
             ApplyMuteUi(_micMuted);
         }));
 
-        t.Controls.Add(MakeRowLabel("Mute banner position", 34));
-        _muteBannerPosCombo = new DarkCombo { Size = new Size(146, 24), Anchor = AnchorStyles.Right };
+        muteGrid.Controls.Add(MakeRowLabel("Mute banner position", 34));
+        _muteBannerPosCombo = new DarkCombo { Size = new Size(146, 26), Anchor = AnchorStyles.Right };
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopCenter, "Top center"));
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopRight, "Top right"));
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.BottomRight, "Bottom right"));
@@ -730,52 +756,83 @@ public sealed class MainForm : Form
             Save();
             ApplyMuteUi(_micMuted);
         };
-        t.Controls.Add(_muteBannerPosCombo);
+        muteGrid.Controls.Add(_muteBannerPosCombo);
+        stack.Controls.Add(WrapSectionCard(muteGrid));
 
-        AddHeader(t, "PROFILES, SYSTEM & UPDATES");
-        t.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
-        t.Controls.Add(NewToggle(IsStartupEnabled(), SetStartupSafe));
+        // ---- Section 4: Profiles, System & Updates ----
+        var sysGrid = MakeSectionGrid();
+        AddSectionTitle(sysGrid, "PROFILES, SYSTEM & UPDATES");
+        sysGrid.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
+        sysGrid.Controls.Add(NewToggle(IsStartupEnabled(), SetStartupSafe));
 
         var filterBtn = MakeActionButton("Choose devices for cycling…", (_, _) => _ = OpenDeviceFilterDialogAsync());
-        filterBtn.Margin = new Padding(0, 8, 0, 0);
-        t.Controls.Add(filterBtn);
-        t.SetColumnSpan(filterBtn, 2);
+        filterBtn.Margin = new Padding(0, 6, 0, 0);
+        sysGrid.Controls.Add(filterBtn);
+        sysGrid.SetColumnSpan(filterBtn, 2);
 
         var profileIoRow = MakeTwoButtonRow(
             ("Export Profiles…", (_, _) => ExportProfiles()),
             ("Import Profiles…", (_, _) => ImportProfiles()));
-        t.Controls.Add(profileIoRow);
-        t.SetColumnSpan(profileIoRow, 2);
+        sysGrid.Controls.Add(profileIoRow);
+        sysGrid.SetColumnSpan(profileIoRow, 2);
 
         var dataRow = MakeTwoButtonRow(
             ("Open Data Folder", (_, _) => OpenPathInShell(AppLog.DataDir, isDirectory: true)),
             ("Open Log File", (_, _) => OpenPathInShell(AppLog.FilePath, isDirectory: false)));
-        t.Controls.Add(dataRow);
-        t.SetColumnSpan(dataRow, 2);
+        sysGrid.Controls.Add(dataRow);
+        sysGrid.SetColumnSpan(dataRow, 2);
 
-        _checkUpdateBtn = MakeActionButton($"Check for Updates (current: v{AppInfo.Version})", (_, _) => _ = CheckForUpdatesAsync());
+        _checkUpdateBtn = MakeActionButton($"Check for Updates  (v{AppInfo.Version})", (_, _) => _ = CheckForUpdatesAsync());
         _checkUpdateBtn.Margin = new Padding(0, 6, 0, 0);
-        t.Controls.Add(_checkUpdateBtn);
-        t.SetColumnSpan(_checkUpdateBtn, 2);
+        sysGrid.Controls.Add(_checkUpdateBtn);
+        sysGrid.SetColumnSpan(_checkUpdateBtn, 2);
 
         var pathLbl = new Label
         {
             Text = $"Settings: {_store.FilePath}\nLog: {AppLog.FilePath}",
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
+            BackColor = Theme.BgSurface,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 50,
+            Height = 46,
             Margin = new Padding(0, 8, 0, 0)
         };
-        t.Controls.Add(pathLbl);
-        t.SetColumnSpan(pathLbl, 2);
+        sysGrid.Controls.Add(pathLbl);
+        sysGrid.SetColumnSpan(pathLbl, 2);
+        stack.Controls.Add(WrapSectionCard(sysGrid));
 
-        panel.Controls.Add(t);
+        panel.Controls.Add(stack);
         UpdateHotKeyButtons();
         RefreshFallbackCombo();
         RefreshMuteBannerPosCombo();
         return panel;
+    }
+
+    private static TableLayoutPanel MakeSectionGrid()
+    {
+        var t = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 2,
+            BackColor = Theme.BgSurface
+        };
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 152));
+        return t;
+    }
+
+    private static SectionCard WrapSectionCard(Control content)
+    {
+        var card = new SectionCard
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 10)
+        };
+        card.Controls.Add(content);
+        return card;
     }
 
     private static TableLayoutPanel MakeTwoButtonRow(
@@ -789,7 +846,7 @@ public sealed class MainForm : Form
             ColumnCount = 2,
             RowCount = 1,
             Margin = new Padding(0, 6, 0, 0),
-            BackColor = Theme.BgCard
+            BackColor = Theme.BgSurface
         };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -803,20 +860,15 @@ public sealed class MainForm : Form
         return row;
     }
 
-    private static Button MakeActionButton(string text, EventHandler onClick)
+    private static ModernButton MakeActionButton(string text, EventHandler onClick)
     {
-        var b = new Button
+        var b = new ModernButton(ModernButtonKind.Secondary)
         {
             Text = text,
-            Font = Theme.Body,
-            ForeColor = Theme.TextPrimary,
-            BackColor = Theme.BgMain,
-            FlatStyle = FlatStyle.Flat,
             Dock = DockStyle.Fill,
-            Height = 30,
-            Cursor = Cursors.Hand
+            Height = 32,
+            CornerRadius = 8
         };
-        b.FlatAppearance.BorderColor = Theme.BgBorder;
         b.Click += onClick;
         return b;
     }
@@ -906,7 +958,7 @@ public sealed class MainForm : Form
             if (!IsDisposed)
             {
                 _checkUpdateBtn.Enabled = true;
-                _checkUpdateBtn.Text = $"Check for Updates (current: v{AppInfo.Version})";
+                _checkUpdateBtn.Text = $"Check for Updates  (v{AppInfo.Version})";
             }
         }
     }
@@ -973,29 +1025,31 @@ public sealed class MainForm : Form
         }
     }
 
-    private static Label MakeRowLabel(string text, int height = 36) => new()
+    private static Label MakeRowLabel(string text, int height = 34) => new()
     {
         Text = text,
         Font = Theme.Body,
-        ForeColor = Theme.TextPrimary,
+        ForeColor = Theme.TextSoft,
+        BackColor = Theme.BgSurface,
         AutoSize = false,
         Dock = DockStyle.Fill,
         Height = height,
         TextAlign = ContentAlignment.MiddleLeft
     };
 
-    private static void AddHeader(TableLayoutPanel t, string text)
+    private static void AddSectionTitle(TableLayoutPanel t, string text)
     {
         var h = new Label
         {
             Text = text,
-            Font = Theme.SmallBold,
-            ForeColor = Theme.TextMuted,
+            Font = Theme.MicroBold,
+            ForeColor = Theme.AccentEnd,
+            BackColor = Theme.BgSurface,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 28,
-            TextAlign = ContentAlignment.BottomLeft,
-            Margin = new Padding(0, 8, 0, 2)
+            Height = 20,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0, 0, 0, 6)
         };
         t.Controls.Add(h);
         t.SetColumnSpan(h, 2);
@@ -1003,17 +1057,12 @@ public sealed class MainForm : Form
 
     private void AddHotKeyRow(TableLayoutPanel t, string text, HotKeyTarget target)
     {
-        var btn = new Button
+        var btn = new ModernButton(ModernButtonKind.Keycap)
         {
-            Font = Theme.SmallBold,
-            ForeColor = Theme.TextPrimary,
-            BackColor = Theme.BgMain,
-            FlatStyle = FlatStyle.Flat,
             Size = new Size(146, 26),
             Anchor = AnchorStyles.Right,
-            Cursor = Cursors.Hand
+            Margin = new Padding(0, 2, 0, 2)
         };
-        btn.FlatAppearance.BorderColor = Theme.BgBorder;
         btn.Click += (_, _) => BeginCapture(target);
         btn.LostFocus += (_, _) => { if (_capturing == target) CancelCapture(); };
         _hkButtons[target] = btn;
@@ -1046,8 +1095,7 @@ public sealed class MainForm : Form
         _settingsPanel.Visible = _settingsOpen;
         _cardsPanel.Visible = !_settingsOpen && hasCards;
         _emptyPanel.Visible = !_settingsOpen && !hasCards;
-        _gearBtn.BackColor = _settingsOpen ? Theme.BgCardHover : Theme.BgMain;
-        _gearBtn.ForeColor = _settingsOpen ? Theme.Accent : Theme.TextMuted;
+        _gearBtn.Active = _settingsOpen;
     }
 
     private string? SlotFor(int index) =>
@@ -1157,7 +1205,7 @@ public sealed class MainForm : Form
     {
         float k = _cardsPanel.DeviceDpi / 96f;
         int width = Math.Max((int)Math.Round(220 * k), _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Horizontal);
-        int marginBottom = (int)Math.Round(8 * k);
+        int marginBottom = (int)Math.Round(10 * k);
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
         {
             cc.Scale = k;
@@ -1190,13 +1238,13 @@ public sealed class MainForm : Form
     private void UpdateNow()
     {
         string outText = _snap?.OutName ?? "No output device";
+        string? commShort = null;
         if (_snap?.DefaultCommOut is Guid commId && commId != _snap.DefaultOut && !string.IsNullOrEmpty(_snap.CommOutName))
         {
-            outText += $"  (Comm: {ProfileLogic.ExtractShortDeviceName(_snap.CommOutName) ?? _snap.CommOutName})";
+            commShort = ProfileLogic.ExtractShortDeviceName(_snap.CommOutName) ?? _snap.CommOutName;
         }
-        _nowOut.Text = outText;
-        _nowIn.Text = (_snap?.InName ?? "No input device") + (_micMuted ? "   ● MUTED" : "");
-        _nowIn.ForeColor = _micMuted ? Theme.Danger : Theme.TextPrimary;
+        string inText = _snap?.InName ?? "No input device";
+        _liveNow.UpdateLiveState(outText, commShort, inText, _micMuted);
         UpdateTrayTooltip();
     }
 
@@ -1240,7 +1288,7 @@ public sealed class MainForm : Form
         var cards = _cardsPanel.Controls.OfType<CardControl>().ToList();
         if (cards.Count == 0) return;
 
-        int gap = (int)Math.Round(_cardsPanel.DeviceDpi / 96f * 4f);
+        int gap = (int)Math.Round(_cardsPanel.DeviceDpi / 96f * 5f);
         int newDropIndex = cards.Count;
         int newDropLineY = cards[^1].Bottom + gap;
         for (int i = 0; i < cards.Count; i++)
@@ -1442,6 +1490,7 @@ public sealed class MainForm : Form
         foreach (var (target, btn) in _hkButtons)
         {
             var b = GetBinding(target);
+            btn.Active = false;
             btn.Text = b.Format();
             btn.ForeColor = b.IsEnabled ? Theme.TextPrimary : Theme.TextMuted;
         }
@@ -1456,8 +1505,9 @@ public sealed class MainForm : Form
         _hotKeys.UnregisterAll();
         UpdateHotKeyButtons();
         var btn = _hkButtons[target];
+        btn.Active = true;
         btn.Text = "Press keys…";
-        btn.ForeColor = Theme.Accent;
+        btn.ForeColor = Theme.AccentEnd;
         SetStatus("Press shortcut (Backspace/Del to disable, Esc to cancel)", false);
     }
 

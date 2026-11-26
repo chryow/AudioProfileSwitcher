@@ -16,39 +16,32 @@ internal abstract class DarkDialog : Form
         BackColor = Theme.BgMain;
         ForeColor = Theme.TextPrimary;
         Font = Theme.Body;
+        DoubleBuffered = true;
     }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
         Native.DarkTitleBar(Handle);
+        Native.RoundCorners(Handle);
+        Native.SetBorderColor(Handle, Theme.BgBorderStrong);
     }
 
     protected static Label MakeLabel(string text, Point location) =>
-        new() { Text = text, Location = location, AutoSize = true, ForeColor = Theme.TextMuted };
+        new() { Text = text, Location = location, AutoSize = true, Font = Theme.SmallBold, ForeColor = Theme.TextMuted };
 
-    protected static Button MakeButton(string text, Point location, bool primary, int width = 100)
-    {
-        var b = new Button
+    protected static ModernButton MakeButton(string text, Point location, bool primary, int width = 104) =>
+        new(primary ? ModernButtonKind.Primary : ModernButtonKind.Secondary)
         {
             Text = text,
-            Font = Theme.BodyBold,
-            ForeColor = Theme.TextPrimary,
-            BackColor = primary ? Theme.Accent : Theme.BgCard,
-            FlatStyle = FlatStyle.Flat,
-            Size = new Size(width, 30),
-            Location = location,
-            Cursor = Cursors.Hand
+            Size = new Size(width, 32),
+            Location = location
         };
-        b.FlatAppearance.BorderColor = Theme.BgBorder;
-        b.FlatAppearance.BorderSize = primary ? 0 : 1;
-        return b;
-    }
 }
 
 internal sealed class CardEditorDialog : DarkDialog
 {
-    private readonly TextBox _name;
+    private readonly DarkTextBox _name;
     private readonly FlowLayoutPanel _suggestionsPanel;
     private readonly DarkCombo _out = new();
     private readonly DarkCombo _commOut = new();
@@ -69,18 +62,15 @@ internal sealed class CardEditorDialog : DarkDialog
         bool isNew,
         IReadOnlyList<DeviceItem> outputs,
         IReadOnlyList<DeviceItem> inputs)
-        : base(isNew ? "New Card" : "Edit Card", new Size(360, 492))
+        : base(isNew ? "New Profile Card" : "Edit Profile Card", new Size(376, 514))
     {
         _userEditedName = !isNew && !string.Equals(card.Name, "New Card", StringComparison.OrdinalIgnoreCase);
 
-        _name = new TextBox
+        _name = new DarkTextBox
         {
             Text = card.Name,
-            Location = new Point(16, 32),
-            Width = 328,
-            BackColor = Theme.BgCard,
-            ForeColor = Theme.TextPrimary,
-            BorderStyle = BorderStyle.FixedSingle
+            Location = new Point(18, 34),
+            Size = new Size(340, 32)
         };
         _name.TextChanged += (_, _) =>
         {
@@ -89,36 +79,38 @@ internal sealed class CardEditorDialog : DarkDialog
 
         _suggestionsPanel = new FlowLayoutPanel
         {
-            Location = new Point(16, 58),
-            Size = new Size(328, 24),
+            Location = new Point(18, 72),
+            Size = new Size(340, 28),
             BackColor = Theme.BgMain,
             WrapContents = false,
             Margin = Padding.Empty
         };
 
-        _out.Location = new Point(16, 108); _out.Width = 328;
+        // Output device + optional output volume
+        _out.Location = new Point(18, 126); _out.Width = 340;
         Fill(_out, outputs, card.OutputId, card.OutputName, "(Don't change)");
 
         int initialOutVol = card.OutputVolume ?? (SelectedOutput?.CurrentVolume ?? 80);
-        _outVolToggle = new ToggleSwitch { Location = new Point(16, 142), Checked = card.OutputVolume.HasValue };
+        _outVolToggle = new ToggleSwitch { Location = new Point(18, 162), Checked = card.OutputVolume.HasValue };
         var outVolCap = new Label
         {
             Text = "Output volume",
-            Location = new Point(62, 144),
+            Location = new Point(68, 165),
             AutoSize = true,
-            ForeColor = Theme.TextMuted
+            ForeColor = Theme.TextSoft
         };
         _outVolSlider = new DarkSlider
         {
-            Location = new Point(156, 141),
-            Size = new Size(144, 22),
+            Location = new Point(164, 161),
+            Size = new Size(148, 24),
             Value = Math.Clamp(initialOutVol, 0, 100),
             Enabled = card.OutputVolume.HasValue
         };
         _outVolValueLbl = new Label
         {
-            Location = new Point(304, 143),
-            Size = new Size(40, 20),
+            Location = new Point(316, 163),
+            Size = new Size(42, 20),
+            Font = Theme.SmallBold,
             TextAlign = ContentAlignment.MiddleRight,
             ForeColor = Theme.TextSoft
         };
@@ -129,32 +121,35 @@ internal sealed class CardEditorDialog : DarkDialog
         };
         _outVolSlider.ValueChanged += (_, _) => UpdateVolumeLabels();
 
-        _commOut.Location = new Point(16, 194); _commOut.Width = 328;
+        // Separate voice / communications output
+        _commOut.Location = new Point(18, 218); _commOut.Width = 340;
         Fill(_commOut, outputs, card.CommOutputId, card.CommOutputName, "(Same as output)");
 
-        _in.Location = new Point(16, 252); _in.Width = 328;
+        // Input device + optional input volume
+        _in.Location = new Point(18, 278); _in.Width = 340;
         Fill(_in, inputs, card.InputId, card.InputName, "(Don't change)");
 
         int initialInVol = card.InputVolume ?? (SelectedInput?.CurrentVolume ?? 100);
-        _inVolToggle = new ToggleSwitch { Location = new Point(16, 286), Checked = card.InputVolume.HasValue };
+        _inVolToggle = new ToggleSwitch { Location = new Point(18, 314), Checked = card.InputVolume.HasValue };
         var inVolCap = new Label
         {
             Text = "Input volume",
-            Location = new Point(62, 288),
+            Location = new Point(68, 317),
             AutoSize = true,
-            ForeColor = Theme.TextMuted
+            ForeColor = Theme.TextSoft
         };
         _inVolSlider = new DarkSlider
         {
-            Location = new Point(156, 285),
-            Size = new Size(144, 22),
+            Location = new Point(164, 313),
+            Size = new Size(148, 24),
             Value = Math.Clamp(initialInVol, 0, 100),
             Enabled = card.InputVolume.HasValue
         };
         _inVolValueLbl = new Label
         {
-            Location = new Point(304, 287),
-            Size = new Size(40, 20),
+            Location = new Point(316, 315),
+            Size = new Size(42, 20),
+            Font = Theme.SmallBold,
             TextAlign = ContentAlignment.MiddleRight,
             ForeColor = Theme.TextSoft
         };
@@ -165,14 +160,24 @@ internal sealed class CardEditorDialog : DarkDialog
         };
         _inVolSlider.ValueChanged += (_, _) => UpdateVolumeLabels();
 
-        _auto = new ToggleSwitch { Location = new Point(16, 332), Checked = card.AutoActivate };
+        // Auto-activate section pill
+        var autoCard = new SectionCard
+        {
+            Location = new Point(18, 358),
+            Size = new Size(340, 56),
+            Padding = Padding.Empty
+        };
+        _auto = new ToggleSwitch { Location = new Point(14, 17), Checked = card.AutoActivate };
         var autoLbl = new Label
         {
-            Text = "Switch to this card automatically when one of its devices connects",
-            Location = new Point(64, 326),
-            Size = new Size(280, 36),
-            ForeColor = Theme.TextMuted
+            Text = "Auto-switch to this card when one of its devices connects",
+            Location = new Point(66, 10),
+            Size = new Size(262, 36),
+            BackColor = Theme.BgSurface,
+            ForeColor = Theme.TextSoft
         };
+        autoCard.Controls.Add(_auto);
+        autoCard.Controls.Add(autoLbl);
 
         _out.SelectedIndexChanged += (_, _) =>
         {
@@ -186,41 +191,55 @@ internal sealed class CardEditorDialog : DarkDialog
             RefreshNameSuggestions(autoUpdateName: !_userEditedName);
         };
 
-        var save = MakeButton("Save Card", new Point(136, 444), true);
+        var save = MakeButton("Save Card", new Point(146, 462), primary: true, width: 106);
         save.DialogResult = DialogResult.OK;
-        var cancel = MakeButton("Cancel", new Point(244, 444), false);
+        var cancel = MakeButton("Cancel", new Point(260, 462), primary: false, width: 98);
         cancel.DialogResult = DialogResult.Cancel;
-        AcceptButton = save;
-        CancelButton = cancel;
 
         Controls.AddRange(new Control[]
         {
-            MakeLabel("Card name", new Point(16, 12)), _name, _suggestionsPanel,
-            MakeLabel("Output device (speakers / headset)", new Point(16, 88)), _out,
+            MakeLabel("CARD NAME", new Point(18, 16)), _name, _suggestionsPanel,
+            MakeLabel("OUTPUT DEVICE (SPEAKERS / HEADSET)", new Point(18, 108)), _out,
             _outVolToggle, outVolCap, _outVolSlider, _outVolValueLbl,
-            MakeLabel("Voice / communications output (Discord, Zoom, Teams)", new Point(16, 174)), _commOut,
-            MakeLabel("Input device (microphone)", new Point(16, 232)), _in,
+            MakeLabel("VOICE / COMMUNICATIONS OUTPUT (DISCORD, ZOOM, TEAMS)", new Point(18, 200)), _commOut,
+            MakeLabel("INPUT DEVICE (MICROPHONE)", new Point(18, 260)), _in,
             _inVolToggle, inVolCap, _inVolSlider, _inVolValueLbl,
-            _auto, autoLbl, save, cancel
+            autoCard, save, cancel
         });
 
         UpdateVolumeLabels();
         RefreshNameSuggestions(autoUpdateName: isNew && !_userEditedName);
     }
 
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            DialogResult = DialogResult.Cancel;
+            Close();
+            return true;
+        }
+        if (keyData == Keys.Enter)
+        {
+            DialogResult = DialogResult.OK;
+            Close();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        _name.Focus();
-        _name.SelectAll();
+        _name.FocusInput(selectAll: true);
     }
 
     private void UpdateVolumeLabels()
     {
         _outVolValueLbl.Text = _outVolToggle.Checked ? $"{_outVolSlider.Value}%" : "Keep";
-        _outVolValueLbl.ForeColor = _outVolToggle.Checked ? Theme.TextPrimary : Theme.TextMuted;
+        _outVolValueLbl.ForeColor = _outVolToggle.Checked ? Theme.AccentEnd : Theme.TextMuted;
         _inVolValueLbl.Text = _inVolToggle.Checked ? $"{_inVolSlider.Value}%" : "Keep";
-        _inVolValueLbl.ForeColor = _inVolToggle.Checked ? Theme.TextPrimary : Theme.TextMuted;
+        _inVolValueLbl.ForeColor = _inVolToggle.Checked ? Theme.AccentEnd : Theme.TextMuted;
     }
 
     private void RefreshNameSuggestions(bool autoUpdateName)
@@ -246,27 +265,18 @@ internal sealed class CardEditorDialog : DarkDialog
         foreach (var suggestion in ProfileLogic.SuggestCardNames(outName, inName, commName))
         {
             var s = suggestion;
-            var chip = new Button
+            var measured = TextRenderer.MeasureText(s, Theme.Small);
+            var chip = new ModernButton(ModernButtonKind.Chip)
             {
                 Text = s,
-                Font = Theme.Small,
-                ForeColor = Theme.TextSoft,
-                BackColor = Theme.BgCard,
-                FlatStyle = FlatStyle.Flat,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Margin = new Padding(0, 0, 6, 0),
-                Padding = new Padding(4, 0, 4, 0),
-                Cursor = Cursors.Hand,
-                TabStop = false
+                Size = new Size(Math.Clamp(measured.Width + 16, 48, 160), 24),
+                Margin = new Padding(0, 0, 6, 0)
             };
-            chip.FlatAppearance.BorderColor = Theme.BgBorder;
-            chip.FlatAppearance.BorderSize = 1;
             chip.Click += (_, _) =>
             {
                 _userEditedName = true;
                 _name.Text = s;
-                _name.Focus();
+                _name.FocusInput();
                 _name.SelectionStart = _name.Text.Length;
             };
             _suggestionsPanel.Controls.Add(chip);
@@ -321,41 +331,56 @@ internal sealed class DeviceFilterDialog : DarkDialog
         IReadOnlyList<DeviceItem> inputs,
         IReadOnlyList<CycleDeviceEntry> selectedOut,
         IReadOnlyList<CycleDeviceEntry> selectedIn)
-        : base("Cycle Device Filter", new Size(388, 424))
+        : base("Cycle Device Filter", new Size(404, 440))
     {
-        _outList = new DarkCheckedList { Location = new Point(16, 34), Size = new Size(356, 138) };
+        _outList = new DarkCheckedList { Location = new Point(18, 36), Size = new Size(368, 142) };
         PopulateList(_outList, outputs, selectedOut);
 
-        _inList = new DarkCheckedList { Location = new Point(16, 204), Size = new Size(356, 138) };
+        _inList = new DarkCheckedList { Location = new Point(18, 212), Size = new Size(368, 142) };
         PopulateList(_inList, inputs, selectedIn);
 
-        var clearBtn = MakeButton("Clear All", new Point(16, 364), false, width: 84);
+        var clearBtn = MakeButton("Clear All", new Point(18, 378), primary: false, width: 84);
         clearBtn.Click += (_, _) =>
         {
             _outList.SetAllChecked(false);
             _inList.SetAllChecked(false);
         };
 
-        var selectAllBtn = MakeButton("Select All", new Point(106, 364), false, width: 84);
+        var selectAllBtn = MakeButton("Select All", new Point(108, 378), primary: false, width: 84);
         selectAllBtn.Click += (_, _) =>
         {
             _outList.SetAllChecked(true);
             _inList.SetAllChecked(true);
         };
 
-        var save = MakeButton("Save Filter", new Point(198, 364), true, width: 92);
+        var save = MakeButton("Save Filter", new Point(206, 378), primary: true, width: 96);
         save.DialogResult = DialogResult.OK;
-        var cancel = MakeButton("Cancel", new Point(296, 364), false, width: 76);
+        var cancel = MakeButton("Cancel", new Point(308, 378), primary: false, width: 78);
         cancel.DialogResult = DialogResult.Cancel;
-        AcceptButton = save;
-        CancelButton = cancel;
 
         Controls.AddRange(new Control[]
         {
-            MakeLabel("Include in Cycle Output (none checked = all):", new Point(16, 12)), _outList,
-            MakeLabel("Include in Cycle Input (none checked = all):", new Point(16, 182)), _inList,
+            MakeLabel("INCLUDE IN CYCLE OUTPUT (NONE CHECKED = ALL)", new Point(18, 16)), _outList,
+            MakeLabel("INCLUDE IN CYCLE INPUT (NONE CHECKED = ALL)", new Point(18, 192)), _inList,
             clearBtn, selectAllBtn, save, cancel
         });
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            DialogResult = DialogResult.Cancel;
+            Close();
+            return true;
+        }
+        if (keyData == Keys.Enter)
+        {
+            DialogResult = DialogResult.OK;
+            Close();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     private static void PopulateList(

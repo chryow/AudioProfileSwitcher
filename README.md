@@ -4,14 +4,13 @@ A lightweight, dark-mode Windows 10/11 desktop & tray utility for switching **ou
 
 Built so you can walk away from your desk and switch between speakers, wireless headsets, and microphones instantaneously without digging through Windows Sound settings.
 
-## Highlights in v1.3.0
+## Highlights in v1.4.0
 
-- **Modern CoreAudio Architecture (`NAudio.Wasapi` + Native `IPolicyConfig` COM)** — Direct `IMMDeviceEnumerator` / `IMMNotificationClient` and `AudioEndpointVolume` event callbacks with deterministic COM cleanup, zero legacy `.NET Framework 4.0` shims, and 100% compatibility with existing `config.json` endpoint GUIDs.
-- **Global Show / Hide Window Hotkey** — Pop the switcher window up or hide it to the tray from anywhere (default `Ctrl + Shift + Space`, rebindable or disableable with `Backspace`/`Delete` in Settings).
-- **Interactive / Draggable `MIC MUTED` Pill** — Optional interactive mode lets you drag the `● MIC MUTED` overlay to any custom spot across monitors (saved as `Custom` position) or click it to unmute in one click, while keeping zero-interference click-through mode available for gaming.
-- **Resizable Window Height & Custom Dark Checklist** — Drag the bottom grip to resize window height (`420–1400 px`, persisted across launches), and filter cycle devices in a custom-painted dark checklist (`DarkCheckedList`) with `Select All` / `Clear All`.
-- **Portable Profile Import / Export & In-App Update Check** — Export/import your cards and cycle filters as portable `.json` bundles (automatically relinking device GUIDs by name on a new PC) and check GitHub Releases for updates in one click.
-- **Profile Cards, Volumes & Distinct Audio Cues** — Optional separate **Voice / Communications Output** (`COMM` row), per-card **Output / Input volumes (0–100%)**, disconnect fallback modes (`None`, `Previous card`, `Specific card`), and click-free preloaded WAV cues (`Switch`, `Muted`, `Unmuted`).
+- **Modern Obsidian & Indigo-Violet UI** — Layered gradient profile cards with glowing active accents, keycap shortcut slots (`1–9`), micro-pill device/volume badges, auto-activate lightning indicators, animated toggle switches, custom dark dropdowns (zero legacy Win32 gray chrome), grouped Settings section cards, and Windows 11 rounded corners & tinted borders.
+- **Interactive Live Audio Header** — Custom-painted vector Speaker & Microphone status card showing active Output/Comm/Input devices with a clickable `● LIVE` / `● MUTED` pill right in the header.
+- **Smooth Floating Overlays** — Fade-animated glassy OSD switch toasts and an optional interactive/draggable `● MIC MUTED` pill (drag to any custom position or click to unmute, or stay 100% click-through for games).
+- **Modern CoreAudio Architecture (`NAudio.Wasapi` + Native `IPolicyConfig` COM)** — Event-driven `IMMNotificationClient` & endpoint mute callbacks with zero legacy `.NET Framework 4.0` shims and 100% `config.json` compatibility.
+- **Power Workflow & Portability** — Global Show/Hide Window hotkey (`Ctrl + Shift + Space`), resizable window height (`440–1400 px`), custom dark checklist (`DarkCheckedList`), portable JSON profile Import/Export with automatic name relinking, and one-click GitHub Release update checking.
 
 ## Download & Run
 
