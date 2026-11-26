@@ -5,7 +5,7 @@ namespace AudioProfileSwitcher;
 
 public static class AppInfo
 {
-    public const string Version = "1.4.1";
+    public const string Version = "1.5.0";
     public const string ReleasesPageUrl = "https://github.com/chryow/AudioProfileSwitcher/releases";
     public const string LatestReleaseApiUrl = "https://api.github.com/repos/chryow/AudioProfileSwitcher/releases/latest";
 }
@@ -192,8 +192,32 @@ public class AppConfig
     public int? WindowX { get; set; }
     public int? WindowY { get; set; }
     public int? WindowHeight { get; set; }
+    public bool VoiceControlEnabled { get; set; }
+    public string VoiceWakePhrase { get; set; } = "Audio";
+    public Guid? VoiceInputDeviceId { get; set; }
+    public string VoiceInputDeviceName { get; set; } = "Default";
+    public int VoiceConfidencePercent { get; set; } = 78;
     public bool TrayHintShown { get; set; }
 }
+
+public enum VoiceCommandKind
+{
+    ActivateCard,
+    CycleCard,
+    CycleOutput,
+    CycleInput,
+    MuteMic,
+    UnmuteMic,
+    ToggleMute,
+    ShowWindow,
+    HideWindow
+}
+
+public readonly record struct VoiceCommand(
+    VoiceCommandKind Kind,
+    Guid? CardId = null,
+    string Phrase = "",
+    float Confidence = 1f);
 
 /// <summary>Portable JSON bundle for exporting/importing cards and cycle filters across PCs.</summary>
 public sealed class ProfileExportBundle

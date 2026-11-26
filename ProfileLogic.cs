@@ -125,6 +125,20 @@ public static class ProfileLogic
             changed = true;
         }
 
+        string cleanWake = SanitizeWakePhrase(config.VoiceWakePhrase);
+        if (!string.Equals(config.VoiceWakePhrase, cleanWake, StringComparison.Ordinal))
+        {
+            config.VoiceWakePhrase = cleanWake;
+            changed = true;
+        }
+
+        int clampedConf = Math.Clamp(config.VoiceConfidencePercent, 50, 95);
+        if (config.VoiceConfidencePercent != clampedConf)
+        {
+            config.VoiceConfidencePercent = clampedConf;
+            changed = true;
+        }
+
         return changed;
     }
 
@@ -149,7 +163,7 @@ public static class ProfileLogic
     }
 
     /// <summary>
-    /// Relinks disconnected card &amp; cycle-filter GUIDs when a connected device matches by full name,
+    /// Relinks disconnected card, cycle-filter &amp; pinned voice-mic GUIDs when a connected device matches by full name,
     /// and backfills empty names on migrated cycle entries.
     /// </summary>
     public static bool RelinkByName(AppConfig config, AudioSnapshot snap, Action<string>? log = null)
@@ -192,6 +206,20 @@ public static class ProfileLogic
                     changed = true;
                     log?.Invoke($"Auto-relinked card '{card.Name}' input by name to {match.Value}.");
                 }
+            }
+        }
+
+        if (config.VoiceInputDeviceId.HasValue &&
+            !snap.InputIds.Contains(config.VoiceInputDeviceId.Value) &&
+            IsMeaningfulDeviceName(config.VoiceInputDeviceName) &&
+            !config.VoiceInputDeviceName.Equals("Default", StringComparison.OrdinalIgnoreCase))
+        {
+            var match = FindByName(snap.InputNames, config.VoiceInputDeviceName);
+            if (match.HasValue)
+            {
+                config.VoiceInputDeviceId = match.Value;
+                changed = true;
+                log?.Invoke($"Auto-relinked voice mic '{config.VoiceInputDeviceName}' by name to {match.Value}.");
             }
         }
 
@@ -733,6 +761,183 @@ public static class ProfileLogic
         }
 
         return new ReleaseCheckResult(false, string.IsNullOrEmpty(tag) ? $"v{currentVersion}" : tag, url);
+    }
+
+    // ---- Offline Voice Control helpers ------------------------------------------------------
+
+    public static string SanitizeWakePhrase(string? raw)
+    {
+        var spoken = SanitizeSpokenText(raw, maxLength: 32);
+        return string.IsNullOrEmpty(spoken) ? "Audio" : spoken;
+    }
+
+    public static string SanitizeSpokenCardName(string? cardName) =>
+        SanitizeSpokenText(cardName, maxLength: 48);
+
+    private static string SanitizeSpokenText(string? raw, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var sb = new StringBuilder(Math.Min(raw.Length, maxLength));
+        bool lastSpace = true;
+
+        foreach (char ch in raw)
+        {
+            if (char.IsLetterOrDigit(ch) || ch == '\'')
+            {
+                sb.Append(ch);
+                lastSpace = false;
+            }
+            else if (!lastSpace)
+            {
+                sb.Append(' ');
+                lastSpace = true;
+            }
+
+            if (sb.Length >= maxLength) break;
+        }
+
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Builds a deterministic phrase -> VoiceCommand map using the configured wake phrase
+    /// and current profile cards (by spoken card name and slot numbers 1..9).
+    /// </summary>
+    public static Dictionary<string, VoiceCommand> BuildVoiceCommandMap(
+        string? wakePhrase,
+        IReadOnlyList<AudioCard> cards)
+    {
+        string wake = SanitizeWakePhrase(wakePhrase);
+        var map = new Dictionary<string, VoiceCommand>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string phrase, VoiceCommand cmd)
+        {
+            if (!string.IsNullOrWhiteSpace(phrase) && !map.ContainsKey(phrase))
+                map[phrase] = cmd with { Phrase = phrase };
+        }
+
+        for (int i = 0; i < cards.Count; i++)
+        {
+            var card = cards[i];
+            string spoken = SanitizeSpokenCardName(card.Name);
+            if (!string.IsNullOrEmpty(spoken))
+            {
+                Add($"{wake} switch to {spoken}", new VoiceCommand(VoiceCommandKind.ActivateCard, card.Id));
+                Add($"{wake} {spoken}", new VoiceCommand(VoiceCommandKind.ActivateCard, card.Id));
+            }
+
+            if (i < 9)
+            {
+                int slot = i + 1;
+                Add($"{wake} card {slot}", new VoiceCommand(VoiceCommandKind.ActivateCard, card.Id));
+                Add($"{wake} switch to card {slot}", new VoiceCommand(VoiceCommandKind.ActivateCard, card.Id));
+            }
+        }
+
+        Add($"{wake} next card", new VoiceCommand(VoiceCommandKind.CycleCard));
+        Add($"{wake} cycle card", new VoiceCommand(VoiceCommandKind.CycleCard));
+        Add($"{wake} cycle cards", new VoiceCommand(VoiceCommandKind.CycleCard));
+
+        Add($"{wake} next output", new VoiceCommand(VoiceCommandKind.CycleOutput));
+        Add($"{wake} cycle output", new VoiceCommand(VoiceCommandKind.CycleOutput));
+        Add($"{wake} next input", new VoiceCommand(VoiceCommandKind.CycleInput));
+        Add($"{wake} cycle input", new VoiceCommand(VoiceCommandKind.CycleInput));
+
+        Add($"{wake} mute", new VoiceCommand(VoiceCommandKind.MuteMic));
+        Add($"{wake} mute mic", new VoiceCommand(VoiceCommandKind.MuteMic));
+        Add($"{wake} mute microphone", new VoiceCommand(VoiceCommandKind.MuteMic));
+
+        Add($"{wake} unmute", new VoiceCommand(VoiceCommandKind.UnmuteMic));
+        Add($"{wake} unmute mic", new VoiceCommand(VoiceCommandKind.UnmuteMic));
+        Add($"{wake} unmute microphone", new VoiceCommand(VoiceCommandKind.UnmuteMic));
+
+        Add($"{wake} toggle mute", new VoiceCommand(VoiceCommandKind.ToggleMute));
+
+        Add($"{wake} show window", new VoiceCommand(VoiceCommandKind.ShowWindow));
+        Add($"{wake} open window", new VoiceCommand(VoiceCommandKind.ShowWindow));
+        Add($"{wake} hide window", new VoiceCommand(VoiceCommandKind.HideWindow));
+        Add($"{wake} close window", new VoiceCommand(VoiceCommandKind.HideWindow));
+
+        return map;
+    }
+
+    /// <summary>
+    /// Converts arbitrary WASAPI capture PCM (IEEE Float32 or signed PCM16, mono or multi-channel,
+    /// any sample rate) into 16 kHz / 16-bit / Mono PCM suitable for System.Speech.
+    /// </summary>
+    public static byte[] ResampleTo16kMonoPcm16(
+        ReadOnlySpan<byte> input,
+        int sourceSampleRate,
+        int channels,
+        int bitsPerSample,
+        bool isIeeeFloat)
+    {
+        if (input.IsEmpty || sourceSampleRate <= 0 || channels <= 0)
+            return Array.Empty<byte>();
+
+        int bytesPerSample = bitsPerSample / 8;
+        int frameBytes = bytesPerSample * channels;
+        if (frameBytes <= 0 || input.Length < frameBytes)
+            return Array.Empty<byte>();
+
+        int sourceFrames = input.Length / frameBytes;
+        var mono = new float[sourceFrames];
+
+        for (int f = 0; f < sourceFrames; f++)
+        {
+            float sum = 0f;
+            int frameOffset = f * frameBytes;
+            for (int c = 0; c < channels; c++)
+            {
+                int off = frameOffset + c * bytesPerSample;
+                float sample;
+                if (isIeeeFloat && bitsPerSample == 32)
+                {
+                    sample = BitConverter.ToSingle(input.Slice(off, 4));
+                }
+                else if (!isIeeeFloat && bitsPerSample == 16)
+                {
+                    sample = BitConverter.ToInt16(input.Slice(off, 2)) / 32768f;
+                }
+                else if (!isIeeeFloat && bitsPerSample == 32)
+                {
+                    sample = BitConverter.ToInt32(input.Slice(off, 4)) / 2147483648f;
+                }
+                else
+                {
+                    sample = 0f;
+                }
+                sum += sample;
+            }
+            mono[f] = sum / channels;
+        }
+
+        const int targetRate = 16000;
+        int outFrames = Math.Max(1, (int)Math.Round(sourceFrames * (double)targetRate / sourceSampleRate));
+        var output = new byte[outFrames * 2];
+        double ratio = (double)sourceSampleRate / targetRate;
+
+        for (int i = 0; i < outFrames; i++)
+        {
+            double srcPos = i * ratio;
+            int idx0 = (int)srcPos;
+            float val;
+            if (idx0 >= sourceFrames - 1)
+            {
+                val = mono[sourceFrames - 1];
+            }
+            else
+            {
+                float frac = (float)(srcPos - idx0);
+                val = mono[idx0] + (mono[idx0 + 1] - mono[idx0]) * frac;
+            }
+
+            short s16 = (short)Math.Clamp((int)Math.Round(val * 32767f), short.MinValue, short.MaxValue);
+            output[i * 2] = (byte)(s16 & 0xFF);
+            output[i * 2 + 1] = (byte)((s16 >> 8) & 0xFF);
+        }
+
+        return output;
     }
 }
 

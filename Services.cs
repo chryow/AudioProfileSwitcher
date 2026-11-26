@@ -549,6 +549,24 @@ public sealed class AudioService : IDisposable
             }
         });
 
+    /// <summary>Sets default microphone mute explicitly (idempotent) and returns a fresh snapshot.</summary>
+    public Task<MuteToggleResult> SetMuteAsync(bool mute) =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                if (_disposed) return new MuteToggleResult(null, null);
+                using var mic = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
+                if (mic == null) return new MuteToggleResult(null, null);
+                if (mic.AudioEndpointVolume.Mute != mute)
+                {
+                    mic.AudioEndpointVolume.Mute = mute;
+                    _watchedCaptureMuted = mute;
+                }
+                return new MuteToggleResult(mute, TakeSnapshotLocked());
+            }
+        });
+
     public void Dispose()
     {
         lock (_lock)

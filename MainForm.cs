@@ -12,6 +12,7 @@ public sealed class MainForm : Form
     private readonly ConfigStore _store = new();
     private readonly AppConfig _config;
     private readonly AudioService _audio = new();
+    private readonly VoiceControlService _voice = new();
     private readonly HotKeyService _hotKeys;
     private readonly OsdBannerForm _osd = new();
     private readonly MuteBannerForm _muteBanner = new();
@@ -26,6 +27,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _recoveryTimer = new() { Interval = 1000 };
     private readonly bool _startMinimized;
 
+    private readonly Panel _titleBar;
     private readonly FlowLayoutPanel _cardsPanel;
     private readonly TableLayoutPanel _emptyPanel;
     private readonly Panel _settingsPanel;
@@ -37,6 +39,13 @@ public sealed class MainForm : Form
     private Label _jumpLabel = null!;
     private DarkCombo _fallbackCombo = null!;
     private DarkCombo _muteBannerPosCombo = null!;
+    private ToggleSwitch _voiceToggle = null!;
+    private DarkTextBox _voiceWakeBox = null!;
+    private DarkCombo _voiceMicCombo = null!;
+    private DarkSlider _voiceConfSlider = null!;
+    private Label _voiceConfValueLbl = null!;
+    private Label _voiceStatusLbl = null!;
+    private Label _voiceHintLbl = null!;
     private ModernButton _checkUpdateBtn = null!;
     private Color _statusDotColor = Theme.Success;
 
@@ -47,6 +56,9 @@ public sealed class MainForm : Form
     private bool _settingsOpen;
     private bool _updatingFallbackCombo;
     private bool _updatingBannerPosCombo;
+    private bool _updatingVoiceControls;
+    private bool _voiceListening;
+    private string _voiceStatusText = "Disabled";
     private bool _resizingHeight;
     private int _resizeStartScreenY;
     private int _resizeStartHeight;
@@ -99,8 +111,9 @@ public sealed class MainForm : Form
         Padding = new Padding(1);
         DoubleBuffered = true;
 
-        // ---- modern title bar with vector emblem + version pill ----
+        // ---- modern title bar with vector emblem + version & voice pills ----
         var titleBar = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Theme.BgMain };
+        _titleBar = titleBar;
         titleBar.Paint += (_, e) =>
         {
             var g = e.Graphics;
@@ -112,7 +125,7 @@ public sealed class MainForm : Form
             Gfx.DrawAppEmblem(g, emblem);
 
             int titleX = P(46);
-            var titleRect = new Rectangle(titleX, 0, P(124), titleBar.Height);
+            var titleRect = new Rectangle(titleX, 0, P(116), titleBar.Height);
             TextRenderer.DrawText(g, "AudioSwitcher", Theme.Title, titleRect, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
@@ -122,6 +135,16 @@ public sealed class MainForm : Form
             using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
             TextRenderer.DrawText(g, $"v{AppInfo.Version}", Theme.MicroBold, verRect, Theme.AccentEnd,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+            if (_voiceListening)
+            {
+                var voiceRect = new Rectangle(verRect.Right + P(5), (titleBar.Height - P(18)) / 2, P(48), P(18));
+                using var vcp = Gfx.RoundRect(voiceRect, P(9));
+                using (var vcb = new SolidBrush(Theme.SuccessSoft)) g.FillPath(vcb, vcp);
+                using (var vcpen = new Pen(Color.FromArgb(110, Theme.Success), 1f)) g.DrawPath(vcpen, vcp);
+                TextRenderer.DrawText(g, "● VOICE", Theme.MicroBold, voiceRect, Theme.Success,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
         };
         titleBar.MouseDown += (_, e) =>
         {
@@ -333,6 +356,8 @@ public sealed class MainForm : Form
             _ = RefreshStateAsync(allowAutoEvents: true);
         };
         _audio.StateChanged += OnCoreAudioStateChanged;
+        _voice.CommandRecognized += OnVoiceCommandRecognized;
+        _voice.StatusChanged += OnVoiceStatusChanged;
 
         _debounceTimer.Tick += (_, _) => { _debounceTimer.Stop(); ProcessDebouncedAutoActivate(); };
         _recoveryTimer.Tick += (_, _) =>
@@ -341,6 +366,7 @@ public sealed class MainForm : Form
             AppLog.Info("Recovering hotkeys and audio state after power/session event.");
             RegisterAllHotKeys(force: true);
             _ = ForceRefreshAsync();
+            SyncVoiceControl();
         };
 
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -351,6 +377,7 @@ public sealed class MainForm : Form
         _ = RefreshStateAsync(allowAutoEvents: false, force: true);
         _pollTimer.Tick += (_, _) => _ = RefreshStateAsync(allowAutoEvents: true);
         _pollTimer.Start();
+        SyncVoiceControl();
 
         if (_store.LoadWarning != null) SetStatus(_store.LoadWarning, true);
     }
@@ -521,6 +548,8 @@ public sealed class MainForm : Form
         CaptureWindowBounds(persist: true);
 
         _audio.StateChanged -= OnCoreAudioStateChanged;
+        _voice.CommandRecognized -= OnVoiceCommandRecognized;
+        _voice.StatusChanged -= OnVoiceStatusChanged;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
 
@@ -534,6 +563,7 @@ public sealed class MainForm : Form
         _statusTimer.Dispose();
         _debounceTimer.Dispose();
         _recoveryTimer.Dispose();
+        _voice.Dispose();
         _hotKeys.Dispose();
         _osd.Close();
         _muteBanner.Close();
@@ -759,7 +789,104 @@ public sealed class MainForm : Form
         muteGrid.Controls.Add(_muteBannerPosCombo);
         stack.Controls.Add(WrapSectionCard(muteGrid));
 
-        // ---- Section 4: Profiles, System & Updates ----
+        // ---- Section 4: Offline Voice Control ----
+        var voiceGrid = MakeSectionGrid();
+        AddSectionTitle(voiceGrid, "VOICE CONTROL  ·  OFFLINE");
+        voiceGrid.Controls.Add(MakeRowLabel("Enable voice commands", 32));
+        _voiceToggle = NewToggle(_config.VoiceControlEnabled, on =>
+        {
+            if (_updatingVoiceControls) return;
+            _config.VoiceControlEnabled = on;
+            Save();
+            SyncVoiceControl();
+        });
+        voiceGrid.Controls.Add(_voiceToggle);
+
+        voiceGrid.Controls.Add(MakeRowLabel("Wake phrase", 34));
+        _voiceWakeBox = new DarkTextBox
+        {
+            Text = _config.VoiceWakePhrase,
+            Size = new Size(146, 28),
+            Anchor = AnchorStyles.Right,
+            Padding = new Padding(8, 5, 8, 5)
+        };
+        _voiceWakeBox.Leave += (_, _) => CommitVoiceWakePhrase();
+        voiceGrid.Controls.Add(_voiceWakeBox);
+
+        voiceGrid.Controls.Add(MakeRowLabel("Listening microphone", 34));
+        _voiceMicCombo = new DarkCombo { Size = new Size(146, 26), Anchor = AnchorStyles.Right };
+        _tip.SetToolTip(_voiceMicCombo, "Pin a USB/desk mic so Bluetooth headsets never drop to Hands-Free mono mode");
+        _voiceMicCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (_updatingVoiceControls || _voiceMicCombo.SelectedItem is not DeviceItem item) return;
+            _config.VoiceInputDeviceId = item.Id;
+            _config.VoiceInputDeviceName = item.Id.HasValue ? item.Name : "Default";
+            Save();
+            SyncVoiceControl();
+        };
+        voiceGrid.Controls.Add(_voiceMicCombo);
+
+        voiceGrid.Controls.Add(MakeRowLabel("Confidence threshold", 30));
+        var confPanel = new Panel { Size = new Size(146, 26), Anchor = AnchorStyles.Right, BackColor = Theme.BgSurface };
+        _voiceConfSlider = new DarkSlider
+        {
+            Minimum = 50,
+            Maximum = 95,
+            Value = Math.Clamp(_config.VoiceConfidencePercent, 50, 95),
+            Location = new Point(0, 1),
+            Size = new Size(106, 24)
+        };
+        _voiceConfValueLbl = new Label
+        {
+            Text = $"{_voiceConfSlider.Value}%",
+            Font = Theme.SmallBold,
+            ForeColor = Theme.AccentEnd,
+            BackColor = Theme.BgSurface,
+            Location = new Point(108, 3),
+            Size = new Size(38, 20),
+            TextAlign = ContentAlignment.MiddleRight
+        };
+        _voiceConfSlider.ValueChanged += (_, _) =>
+        {
+            _voiceConfValueLbl.Text = $"{_voiceConfSlider.Value}%";
+            if (_updatingVoiceControls) return;
+            _config.VoiceConfidencePercent = _voiceConfSlider.Value;
+            Save();
+            SyncVoiceControl();
+        };
+        confPanel.Controls.Add(_voiceConfSlider);
+        confPanel.Controls.Add(_voiceConfValueLbl);
+        voiceGrid.Controls.Add(confPanel);
+
+        _voiceStatusLbl = new Label
+        {
+            Text = "Status: Disabled",
+            Font = Theme.SmallBold,
+            ForeColor = Theme.TextMuted,
+            BackColor = Theme.BgSurface,
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Height = 20,
+            Margin = new Padding(0, 6, 0, 2)
+        };
+        voiceGrid.Controls.Add(_voiceStatusLbl);
+        voiceGrid.SetColumnSpan(_voiceStatusLbl, 2);
+
+        _voiceHintLbl = new Label
+        {
+            Font = Theme.Small,
+            ForeColor = Theme.TextMuted,
+            BackColor = Theme.BgSurface,
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Height = 46,
+            Margin = new Padding(0, 0, 0, 2)
+        };
+        voiceGrid.Controls.Add(_voiceHintLbl);
+        voiceGrid.SetColumnSpan(_voiceHintLbl, 2);
+        stack.Controls.Add(WrapSectionCard(voiceGrid));
+
+        // ---- Section 5: Profiles, System & Updates ----
         var sysGrid = MakeSectionGrid();
         AddSectionTitle(sysGrid, "PROFILES, SYSTEM & UPDATES");
         sysGrid.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
@@ -806,6 +933,8 @@ public sealed class MainForm : Form
         UpdateHotKeyButtons();
         RefreshFallbackCombo();
         RefreshMuteBannerPosCombo();
+        RefreshVoiceMicCombo();
+        RefreshVoiceHints();
         return panel;
     }
 
@@ -1093,6 +1222,7 @@ public sealed class MainForm : Form
     private void ToggleSettings()
     {
         if (_capturing != null) CancelCapture();
+        if (_settingsOpen) CommitVoiceWakePhrase();
         _settingsOpen = !_settingsOpen;
         UpdateViews();
     }
@@ -1145,9 +1275,11 @@ public sealed class MainForm : Form
         ResizeCards();
         RefreshCardStates();
         RefreshFallbackCombo();
+        RefreshVoiceHints();
         _cardsPanel.ResumeLayout(true);
         UpdateViews();
         RegisterAllHotKeys();
+        SyncVoiceControl();
     }
 
     private CardControl CreateCardControl(AudioCard card, string? slot)
@@ -1791,6 +1923,202 @@ public sealed class MainForm : Form
         AppLog.Info($"Mic mute toggled -> {(muted ? "Muted" : "Live")}.");
     }
 
+    private async Task SetMicMuteAsync(bool mute)
+    {
+        MuteToggleResult res;
+        try
+        {
+            res = await _audio.SetMuteAsync(mute);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("SetMicMute failed", ex);
+            if (!IsDisposed) ShowFeedback("MICROPHONE", ex.Message, Theme.Danger, playSwitchChime: false);
+            return;
+        }
+
+        if (IsDisposed) return;
+
+        if (res.Muted == null)
+        {
+            ShowFeedback("MICROPHONE", "No input device", Theme.Warning, playSwitchChime: false);
+            return;
+        }
+
+        bool muted = res.Muted.Value;
+        if (res.Snapshot != null)
+            ApplySnapshot(res.Snapshot, allowAutoEvents: false, force: true);
+        else
+            ApplyMuteUi(muted);
+
+        ShowFeedback("MICROPHONE", muted ? "Muted" : "Live (Unmuted)",
+            muted ? Theme.Danger : Theme.Success, playSwitchChime: false);
+
+        if (_config.MuteChimeEnabled)
+        {
+            ChimePlayer.Play(muted ? ChimeCue.Muted : ChimeCue.Unmuted, waitForDeviceRouting: false);
+        }
+
+        AppLog.Info($"Mic mute set -> {(muted ? "Muted" : "Live")}.");
+    }
+
+    // =========================================================================================
+    // Offline Voice Control
+    // =========================================================================================
+
+    private void CommitVoiceWakePhrase()
+    {
+        if (_voiceWakeBox == null) return;
+        string clean = ProfileLogic.SanitizeWakePhrase(_voiceWakeBox.Text);
+        if (!string.Equals(_voiceWakeBox.Text, clean, StringComparison.Ordinal))
+            _voiceWakeBox.Text = clean;
+
+        if (string.Equals(_config.VoiceWakePhrase, clean, StringComparison.Ordinal)) return;
+        _config.VoiceWakePhrase = clean;
+        Save();
+        RefreshVoiceHints();
+        SyncVoiceControl();
+    }
+
+    private void RefreshVoiceMicCombo()
+    {
+        if (_voiceMicCombo == null) return;
+        _updatingVoiceControls = true;
+        try
+        {
+            _voiceMicCombo.Items.Clear();
+            _voiceMicCombo.Items.Add(new DeviceItem(null, "(Default microphone)"));
+
+            var inputs = _snap?.InputNames
+                .OrderBy(kv => kv.Value, StringComparer.CurrentCultureIgnoreCase)
+                .ToList() ?? new List<KeyValuePair<Guid, string>>();
+
+            int selected = 0;
+            foreach (var kv in inputs)
+            {
+                _voiceMicCombo.Items.Add(new DeviceItem(kv.Key, kv.Value, Connected: true));
+                if (_config.VoiceInputDeviceId == kv.Key)
+                    selected = _voiceMicCombo.Items.Count - 1;
+            }
+
+            if (_config.VoiceInputDeviceId.HasValue && selected == 0)
+            {
+                string label = ProfileLogic.IsMeaningfulDeviceName(_config.VoiceInputDeviceName)
+                    ? _config.VoiceInputDeviceName
+                    : "Pinned microphone";
+                _voiceMicCombo.Items.Add(new DeviceItem(_config.VoiceInputDeviceId, label, Connected: false));
+                selected = _voiceMicCombo.Items.Count - 1;
+            }
+
+            _voiceMicCombo.SelectedIndex = selected;
+        }
+        finally
+        {
+            _updatingVoiceControls = false;
+        }
+    }
+
+    private void RefreshVoiceHints()
+    {
+        if (_voiceHintLbl == null) return;
+        string wake = ProfileLogic.SanitizeWakePhrase(_config.VoiceWakePhrase);
+        string sampleCard = _config.Cards.Count > 0
+            ? ProfileLogic.SanitizeSpokenCardName(_config.Cards[0].Name)
+            : "Headset";
+        if (string.IsNullOrEmpty(sampleCard)) sampleCard = "card 1";
+
+        _voiceHintLbl.Text =
+            $"Try: \"{wake} switch to {sampleCard}\" · \"{wake} card 1\"\n" +
+            $"\"{wake} next card\" · \"{wake} mute mic\" · \"{wake} show window\"";
+    }
+
+    private void SyncVoiceControl()
+    {
+        _voice.Configure(
+            _config.VoiceControlEnabled,
+            _config.VoiceWakePhrase,
+            _config.VoiceConfidencePercent,
+            _config.VoiceInputDeviceId,
+            _config.VoiceInputDeviceName,
+            _config.Cards);
+    }
+
+    private void OnVoiceStatusChanged(bool listening, string statusText)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                _voiceListening = listening;
+                _voiceStatusText = statusText;
+                _titleBar.Invalidate();
+                if (_voiceStatusLbl != null)
+                {
+                    _voiceStatusLbl.Text = $"Status: {statusText}";
+                    _voiceStatusLbl.ForeColor = listening
+                        ? Theme.Success
+                        : (_config.VoiceControlEnabled ? Theme.Warning : Theme.TextMuted);
+                }
+                if (_config.VoiceControlEnabled && !listening && statusText.StartsWith("Voice unavailable", StringComparison.Ordinal))
+                {
+                    SetStatus(statusText, true);
+                }
+            }));
+        }
+        catch { }
+    }
+
+    private void OnVoiceCommandRecognized(VoiceCommand cmd)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() => _ = HandleVoiceCommandAsync(cmd)));
+        }
+        catch { }
+    }
+
+    private async Task HandleVoiceCommandAsync(VoiceCommand cmd)
+    {
+        if (IsDisposed) return;
+
+        switch (cmd.Kind)
+        {
+            case VoiceCommandKind.ActivateCard when cmd.CardId.HasValue:
+                var card = _config.Cards.FirstOrDefault(c => c.Id == cmd.CardId.Value);
+                if (card != null) await ActivateCardAsync(card, "VOICE SWITCH");
+                break;
+            case VoiceCommandKind.CycleCard:
+                await CycleCardAsync();
+                break;
+            case VoiceCommandKind.CycleOutput:
+                await CycleOutputAsync();
+                break;
+            case VoiceCommandKind.CycleInput:
+                await CycleInputAsync();
+                break;
+            case VoiceCommandKind.MuteMic:
+                await SetMicMuteAsync(true);
+                break;
+            case VoiceCommandKind.UnmuteMic:
+                await SetMicMuteAsync(false);
+                break;
+            case VoiceCommandKind.ToggleMute:
+                await ToggleMicMuteAsync();
+                break;
+            case VoiceCommandKind.ShowWindow:
+                ShowFromTray();
+                ShowFeedback("VOICE", "Showing AudioSwitcher", Theme.Accent, playSwitchChime: false);
+                break;
+            case VoiceCommandKind.HideWindow:
+                HideToTray();
+                ShowFeedback("VOICE", "Hidden to tray", Theme.Accent, playSwitchChime: false);
+                break;
+        }
+    }
+
     private void ShowFeedback(string category, string title, Color accent, bool playSwitchChime)
     {
         SetStatus($"{category}: {title}", accent == Theme.Warning || accent == Theme.Danger);
@@ -1839,6 +2167,8 @@ public sealed class MainForm : Form
 
         ApplyMuteUi(snap.MicMuted);
         RefreshCardStates();
+        RefreshVoiceMicCombo();
+        SyncVoiceControl();
 
         if (allowAutoEvents && previous != null)
         {
@@ -1987,6 +2317,21 @@ public sealed class MainForm : Form
         };
         muteItem.Click += (_, _) => _ = ToggleMicMuteAsync();
         items.Add(muteItem);
+
+        var voiceItem = new ToolStripMenuItem($"Voice Control ({_voiceStatusText})")
+        {
+            Checked = _config.VoiceControlEnabled
+        };
+        voiceItem.Click += (_, _) =>
+        {
+            _config.VoiceControlEnabled = !_config.VoiceControlEnabled;
+            _updatingVoiceControls = true;
+            if (_voiceToggle != null) _voiceToggle.Checked = _config.VoiceControlEnabled;
+            _updatingVoiceControls = false;
+            Save();
+            SyncVoiceControl();
+        };
+        items.Add(voiceItem);
 
         items.Add("Exit", null, (_, _) => { _allowClose = true; Close(); });
     }
