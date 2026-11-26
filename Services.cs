@@ -24,16 +24,18 @@ public readonly record struct MuteToggleResult(bool? Muted, AudioSnapshot? Snaps
 /// </summary>
 public sealed class AudioService : IDisposable
 {
-    private readonly MMDeviceEnumerator _enumerator = new();
     private readonly NotificationClient _notifClient;
     private readonly object _lock = new();
+    private MMDeviceEnumerator? _enumerator;
     private MMDevice? _watchedCaptureDevice;
     private string? _watchedCaptureRawId;
-    private bool _watchedCaptureMuted;
+    private int _watchedCaptureMuted = -1; // -1 = unknown, 0 = live, 1 = muted
     private bool _notifRegistered;
-    private bool _disposed;
+    private int _disposedFlag;
 
-    /// <summary>Fired (potentially off the UI thread) when endpoints, defaults, states, or mic mute state change.</summary>
+    private bool IsDisposed => Volatile.Read(ref _disposedFlag) != 0;
+
+    /// <summary>Fired (off the UI thread) when endpoints, defaults, states, or mic mute state change.</summary>
     public event Action? StateChanged;
 
     private sealed record EndpointEntry(Guid Id, string RawId, string FullName, MMDevice Device);
@@ -41,41 +43,53 @@ public sealed class AudioService : IDisposable
     public AudioService()
     {
         _notifClient = new NotificationClient(this);
-        try
+        // Initialize CoreAudio COM objects strictly on an MTA ThreadPool thread (never on the UI STA thread).
+        _ = Task.Run(() =>
         {
             lock (_lock)
             {
-                _enumerator.RegisterEndpointNotificationCallback(_notifClient);
-                _notifRegistered = true;
-                using var curIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
-                EnsureCaptureMuteSubscriptionLocked(curIn?.ID);
+                if (IsDisposed) return;
+                EnsureEnumeratorLocked();
             }
+        });
+    }
+
+    private MMDeviceEnumerator? EnsureEnumeratorLocked()
+    {
+        if (IsDisposed) return null;
+        if (_enumerator != null) return _enumerator;
+
+        try
+        {
+            var enumerator = new MMDeviceEnumerator();
+            _enumerator = enumerator;
+            try
+            {
+                enumerator.RegisterEndpointNotificationCallback(_notifClient);
+                _notifRegistered = true;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Failed to subscribe to CoreAudio notifications; falling back to safety polling", ex);
+            }
+            return enumerator;
         }
         catch (Exception ex)
         {
-            AppLog.Error("Failed to subscribe to CoreAudio notifications; falling back to safety polling", ex);
+            AppLog.Error("Failed to create MMDeviceEnumerator", ex);
+            return null;
         }
     }
 
-    private void OnEndpointNotification(bool refreshCaptureWatch)
+    /// <summary>
+    /// Called directly on Windows AudioSes COM callback threads.
+    /// MUST NEVER acquire _lock or call CoreAudio COM methods here, or Windows AudioSes will AB-BA deadlock
+    /// with SetDefaultEndpoint / UnregisterControlChangeNotify.
+    /// </summary>
+    private void OnEndpointNotificationLockFree()
     {
-        bool notify = false;
-        lock (_lock)
-        {
-            if (_disposed) return;
-            if (refreshCaptureWatch)
-            {
-                try
-                {
-                    using var curIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
-                    EnsureCaptureMuteSubscriptionLocked(curIn?.ID);
-                }
-                catch { /* endpoint may still be settling */ }
-            }
-            notify = true;
-        }
-
-        if (notify) RaiseStateChanged();
+        if (IsDisposed) return;
+        ThreadPool.QueueUserWorkItem(_ => RaiseStateChanged());
     }
 
     private void EnsureCaptureMuteSubscriptionLocked(string? captureRawId)
@@ -89,12 +103,12 @@ public sealed class AudioService : IDisposable
         ReleaseCaptureWatchLocked();
         _watchedCaptureRawId = captureRawId;
 
-        if (!string.IsNullOrEmpty(captureRawId))
+        if (!string.IsNullOrEmpty(captureRawId) && _enumerator != null)
         {
             try
             {
                 var dev = _enumerator.GetDevice(captureRawId);
-                _watchedCaptureMuted = dev.AudioEndpointVolume.Mute;
+                Interlocked.Exchange(ref _watchedCaptureMuted, dev.AudioEndpointVolume.Mute ? 1 : 0);
                 dev.AudioEndpointVolume.OnVolumeNotification += OnCaptureVolumeNotification;
                 _watchedCaptureDevice = dev;
             }
@@ -115,34 +129,33 @@ public sealed class AudioService : IDisposable
         }
     }
 
+    /// <summary>Lock-free AudioEndpointVolume callback; never acquires _lock or makes COM calls.</summary>
     private void OnCaptureVolumeNotification(AudioVolumeNotificationData data)
     {
-        bool changed = false;
-        lock (_lock)
+        if (IsDisposed) return;
+        int next = data.Muted ? 1 : 0;
+        int prev = Interlocked.Exchange(ref _watchedCaptureMuted, next);
+        if (prev != next)
         {
-            if (_disposed) return;
-            if (data.Muted != _watchedCaptureMuted)
-            {
-                _watchedCaptureMuted = data.Muted;
-                changed = true;
-            }
+            ThreadPool.QueueUserWorkItem(_ => RaiseStateChanged());
         }
-
-        if (changed) RaiseStateChanged();
     }
 
     private void RaiseStateChanged()
     {
+        if (IsDisposed) return;
         try { StateChanged?.Invoke(); }
         catch (Exception ex) { AppLog.Error("AudioService StateChanged handler failed", ex); }
     }
 
     private MMDevice? TryGetDefaultEndpoint(DataFlow flow, Role role)
     {
+        var enumerator = EnsureEnumeratorLocked();
+        if (enumerator == null) return null;
         try
         {
-            if (!_enumerator.HasDefaultAudioEndpoint(flow, role)) return null;
-            return _enumerator.GetDefaultAudioEndpoint(flow, role);
+            if (!enumerator.HasDefaultAudioEndpoint(flow, role)) return null;
+            return enumerator.GetDefaultAudioEndpoint(flow, role);
         }
         catch
         {
@@ -171,10 +184,11 @@ public sealed class AudioService : IDisposable
     private List<EndpointEntry> EnumerateEndpointsLocked(DataFlow flow)
     {
         var result = new List<EndpointEntry>();
-        MMDeviceCollection? col = null;
+        var enumerator = EnsureEnumeratorLocked();
+        if (enumerator == null) return result;
         try
         {
-            col = _enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active);
+            var col = enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active);
             for (int i = 0; i < col.Count; i++)
             {
                 MMDevice? d = null;
@@ -227,7 +241,7 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return (new List<DeviceItem>(), new List<DeviceItem>());
+                if (IsDisposed) return (new List<DeviceItem>(), new List<DeviceItem>());
                 var outs = EnumerateEndpointsLocked(DataFlow.Render);
                 var ins = EnumerateEndpointsLocked(DataFlow.Capture);
                 try
@@ -267,7 +281,7 @@ public sealed class AudioService : IDisposable
                 try
                 {
                     micMuted = dIn.AudioEndpointVolume.Mute;
-                    _watchedCaptureMuted = micMuted;
+                    Interlocked.Exchange(ref _watchedCaptureMuted, micMuted ? 1 : 0);
                 }
                 catch { }
             }
@@ -317,7 +331,7 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return null;
+                if (IsDisposed) return null;
                 return TakeSnapshotLocked();
             }
         });
@@ -386,7 +400,7 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return new ApplyResult(false, "audio service closed");
+                if (IsDisposed) return new ApplyResult(false, "audio service closed");
 
                 var problems = new List<string>();
                 bool any = false;
@@ -492,7 +506,7 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return new CycleResult(null, null);
+                if (IsDisposed) return new CycleResult(null, null);
                 var next = CycleLocked(DataFlow.Render, filter);
                 if (next == null) return new CycleResult(null, null);
                 return new CycleResult(next, TakeSnapshotLocked());
@@ -504,7 +518,7 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return new CycleResult(null, null);
+                if (IsDisposed) return new CycleResult(null, null);
                 var next = CycleLocked(DataFlow.Capture, filter);
                 if (next == null) return new CycleResult(null, null);
                 return new CycleResult(next, TakeSnapshotLocked());
@@ -539,12 +553,12 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return new MuteToggleResult(null, null);
+                if (IsDisposed) return new MuteToggleResult(null, null);
                 using var mic = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
                 if (mic == null) return new MuteToggleResult(null, null);
                 bool nowMuted = !mic.AudioEndpointVolume.Mute;
                 mic.AudioEndpointVolume.Mute = nowMuted;
-                _watchedCaptureMuted = nowMuted;
+                Interlocked.Exchange(ref _watchedCaptureMuted, nowMuted ? 1 : 0);
                 return new MuteToggleResult(nowMuted, TakeSnapshotLocked());
             }
         });
@@ -555,13 +569,13 @@ public sealed class AudioService : IDisposable
         {
             lock (_lock)
             {
-                if (_disposed) return new MuteToggleResult(null, null);
+                if (IsDisposed) return new MuteToggleResult(null, null);
                 using var mic = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
                 if (mic == null) return new MuteToggleResult(null, null);
                 if (mic.AudioEndpointVolume.Mute != mute)
                 {
                     mic.AudioEndpointVolume.Mute = mute;
-                    _watchedCaptureMuted = mute;
+                    Interlocked.Exchange(ref _watchedCaptureMuted, mute ? 1 : 0);
                 }
                 return new MuteToggleResult(mute, TakeSnapshotLocked());
             }
@@ -569,33 +583,47 @@ public sealed class AudioService : IDisposable
 
     public void Dispose()
     {
-        lock (_lock)
+        if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
+
+        // Tear down CoreAudio COM objects on an MTA thread with a bounded wait so exit never freezes the UI thread.
+        var cleanup = Task.Run(() =>
         {
-            if (_disposed) return;
-            _disposed = true;
-            ReleaseCaptureWatchLocked();
-            if (_notifRegistered)
+            if (!Monitor.TryEnter(_lock, 300)) return;
+            try
             {
-                try { _enumerator.UnregisterEndpointNotificationCallback(_notifClient); } catch { }
-                _notifRegistered = false;
+                ReleaseCaptureWatchLocked();
+                if (_notifRegistered && _enumerator != null)
+                {
+                    try { _enumerator.UnregisterEndpointNotificationCallback(_notifClient); } catch { }
+                    _notifRegistered = false;
+                }
+                if (_enumerator != null)
+                {
+                    try { _enumerator.Dispose(); } catch { }
+                    _enumerator = null;
+                }
             }
-            try { _enumerator.Dispose(); } catch { }
-        }
+            finally
+            {
+                Monitor.Exit(_lock);
+            }
+        });
+        try { cleanup.Wait(400); } catch { }
     }
 
     private sealed class NotificationClient(AudioService owner) : IMMNotificationClient
     {
         public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) =>
-            owner.OnEndpointNotification(refreshCaptureWatch: flow == DataFlow.Capture);
+            owner.OnEndpointNotificationLockFree();
 
         public void OnDeviceAdded(string pwstrDeviceId) =>
-            owner.OnEndpointNotification(refreshCaptureWatch: true);
+            owner.OnEndpointNotificationLockFree();
 
         public void OnDeviceRemoved(string deviceId) =>
-            owner.OnEndpointNotification(refreshCaptureWatch: true);
+            owner.OnEndpointNotificationLockFree();
 
         public void OnDeviceStateChanged(string deviceId, DeviceState newState) =>
-            owner.OnEndpointNotification(refreshCaptureWatch: true);
+            owner.OnEndpointNotificationLockFree();
 
         public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
     }

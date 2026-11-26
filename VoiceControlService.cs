@@ -19,7 +19,7 @@ internal sealed class VoiceControlService : IDisposable
     private SpeechRecognitionEngine? _engine;
     private WasapiCapture? _capture;
     private MMDevice? _captureDevice;
-    private BlockingAudioStream? _audioStream;
+    private volatile BlockingAudioStream? _audioStream;
     private Dictionary<string, VoiceCommand> _commandMap = new(StringComparer.OrdinalIgnoreCase);
 
     private bool _enabled;
@@ -28,7 +28,7 @@ internal sealed class VoiceControlService : IDisposable
     private string _activeGrammarSig = "";
     private float _minConfidence = 0.78f;
     private DateTime _lastTriggerUtc = DateTime.MinValue;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public event Action<VoiceCommand>? CommandRecognized;
     public event Action<bool, string>? StatusChanged;
@@ -355,13 +355,24 @@ internal sealed class VoiceControlService : IDisposable
 
     public void Dispose()
     {
-        lock (_gate)
+        if (_disposed) return;
+        _disposed = true;
+        try { _audioStream?.Close(); } catch { }
+
+        var cleanup = Task.Run(() =>
         {
-            if (_disposed) return;
-            _disposed = true;
-            _enabled = false;
-            StopEngineLocked();
-        }
+            if (!Monitor.TryEnter(_gate, 300)) return;
+            try
+            {
+                _enabled = false;
+                StopEngineLocked();
+            }
+            finally
+            {
+                Monitor.Exit(_gate);
+            }
+        });
+        try { cleanup.Wait(400); } catch { }
     }
 
     /// <summary>Bounded blocking ring-buffer stream feeding live 16 kHz PCM16 into System.Speech.</summary>
