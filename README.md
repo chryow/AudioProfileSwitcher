@@ -16,11 +16,14 @@ Built so you can walk away from your desk and switch between speakers, wireless 
 
 ## Download & Run
 
-1. Download **`AudioProfileSwitcher.exe`** from the latest [GitHub Release](https://github.com/chryow/AudioProfileSwitcher/releases).
-2. Ensure the [.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) is installed (pre-installed on many Windows 11 systems; Windows will prompt if needed).
-3. Launch `AudioProfileSwitcher.exe` — no installer or administrator privileges required.
+Each [GitHub Release](https://github.com/chryow/AudioProfileSwitcher/releases) includes **two** single-file Windows x64 executables — pick whichever fits best:
 
-Settings and rolling logs are stored in `%AppData%\AudioProfileSwitcher\` (`config.json` and `app.log`) and can be opened directly from **Settings → Open Data Folder / Open Log File**.
+| File | Size | What's inside | Best for |
+| :--- | :--- | :--- | :--- |
+| **`AudioProfileSwitcher.exe`** | ~430 KB | Lightweight (**framework-dependent**) — contains only the app; uses Windows' shared [.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) (prompts to install if missing). | Fast download & minimal disk footprint when .NET 8 is installed. |
+| **`AudioProfileSwitcher-standalone.exe`** | ~70 MB | **Self-contained** — bundles the entire .NET 8 Desktop Runtime inside the `.exe` with zero prerequisites. | Plug-and-play on any fresh Windows 10/11 PC with nothing installed. |
+
+No installer or administrator privileges required. Settings and rolling logs are stored in `%AppData%\AudioProfileSwitcher\` (`config.json` and `app.log`) and can be opened directly from **Settings → Open Data Folder / Open Log File**.
 
 ## Build, Test & Publish
 
@@ -31,6 +34,9 @@ dotnet build AudioProfileSwitcher.sln -c Release -warnaserror
 # Run unit tests
 dotnet test
 
-# Publish framework-dependent single-file Windows x64 executable
+# Publish lightweight framework-dependent single-file EXE (~430 KB)
 dotnet publish AudioProfileSwitcher.csproj -c Release -r win-x64 --no-self-contained -p:PublishSingleFile=true -o publish
+
+# Publish self-contained standalone single-file EXE (~70 MB, includes .NET 8 runtime)
+dotnet publish AudioProfileSwitcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o publish-standalone
 ```
