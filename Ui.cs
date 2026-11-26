@@ -45,6 +45,71 @@ internal static class Gfx
     }
 }
 
+/// <summary>Dark renderer for the system tray ContextMenuStrip.</summary>
+internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
+{
+    public DarkMenuRenderer() : base(new DarkColorTable()) { }
+
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+    {
+        using var b = new SolidBrush(Theme.BgCard);
+        e.Graphics.FillRectangle(b, e.AffectedBounds);
+    }
+
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+    {
+        using var b = new SolidBrush(Theme.BgCard);
+        e.Graphics.FillRectangle(b, e.AffectedBounds);
+    }
+
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+    {
+        using var p = new Pen(Theme.BgBorder);
+        e.Graphics.DrawRectangle(p, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
+    }
+
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        var r = new Rectangle(2, 1, e.Item.Width - 4, e.Item.Height - 2);
+        using var b = new SolidBrush(e.Item.Selected && e.Item.Enabled ? Theme.BgCardHover : Theme.BgCard);
+        e.Graphics.FillRectangle(b, r);
+    }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        e.TextColor = e.Item.Enabled ? Theme.TextPrimary : Theme.TextMuted;
+        base.OnRenderItemText(e);
+    }
+
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+    {
+        int y = e.Item.Height / 2;
+        using var p = new Pen(Theme.BgBorder);
+        e.Graphics.DrawLine(p, 8, y, e.Item.Width - 8, y);
+    }
+
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = e.ImageRectangle;
+        var dot = new Rectangle(r.X + (r.Width - 8) / 2, r.Y + (r.Height - 8) / 2, 8, 8);
+        using var b = new SolidBrush(Theme.Accent);
+        g.FillEllipse(b, dot);
+    }
+
+    private sealed class DarkColorTable : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground => Theme.BgCard;
+        public override Color MenuBorder => Theme.BgBorder;
+        public override Color MenuItemBorder => Theme.BgCardHover;
+        public override Color MenuItemSelected => Theme.BgCardHover;
+        public override Color ImageMarginGradientBegin => Theme.BgCard;
+        public override Color ImageMarginGradientMiddle => Theme.BgCard;
+        public override Color ImageMarginGradientEnd => Theme.BgCard;
+    }
+}
+
 /// <summary>Tray icons drawn at startup (speaker glyph; red dot when the mic is muted).</summary>
 internal static class TrayIcons
 {
@@ -195,7 +260,7 @@ internal sealed class CardControl : Control
     public AudioCard Card { get; }
 
     /// <summary>DPI scale factor (1.0 = 96 dpi), set by the parent.</summary>
-    public float Scale { get; set; } = 1f;
+    public new float Scale { get; set; } = 1f;
 
     public event Action<AudioCard>? ActivateRequested;
     public event Action<AudioCard>? EditRequested;

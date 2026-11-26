@@ -18,6 +18,8 @@ public sealed class MainForm : Form
     private readonly ToolTip _tip = new();
     private readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 1500 };
     private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 6000 };
+    private readonly System.Windows.Forms.Timer _debounceTimer = new() { Interval = 2000 };
+    private readonly System.Windows.Forms.Timer _recoveryTimer = new() { Interval = 1000 };
     private readonly bool _startMinimized;
 
     private readonly FlowLayoutPanel _cardsPanel;
@@ -29,8 +31,15 @@ public sealed class MainForm : Form
     private readonly Button _gearBtn;
     private readonly Dictionary<HotKeyTarget, Button> _hkButtons = new();
     private Label _jumpLabel = null!;
+    private DarkCombo _fallbackCombo = null!;
+
+    // Auto-activate debounce & flapping guard
+    private readonly HashSet<Guid> _pendingNewDevices = new();
+    private readonly Dictionary<Guid, Queue<DateTime>> _connectHistory = new();
 
     private bool _settingsOpen;
+    private bool _updatingFallbackCombo;
+    private bool _polling;
     private HotKeyTarget? _capturing;
     private AudioSnapshot? _snap;
     private string _lastSignature = "";
@@ -38,6 +47,11 @@ public sealed class MainForm : Form
     private bool _allowClose;
     private int _dropIndex = -1;
     private int _dropLineY = -1;
+
+    private sealed record CardChoice(Guid? Id, string Name)
+    {
+        public override string ToString() => Name;
+    }
 
     public MainForm(bool startMinimized = false)
     {
@@ -50,8 +64,8 @@ public sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "AudioSwitcher";
         Icon = TrayIcons.Normal;
-        Size = new Size(380, 600);
-        MinimumSize = new Size(380, 600);
+        Size = new Size(380, 620);
+        MinimumSize = new Size(380, 620);
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Theme.BgMain;
@@ -77,7 +91,7 @@ public sealed class MainForm : Form
         _gearBtn = MakeIconButton(Theme.Glyph("\uE713", "⚙"), "Settings & hotkeys", (_, _) => ToggleSettings(), Theme.BgCardHover);
         var minBtn = MakeIconButton(Theme.Glyph("\uE921", "—"), "Minimize", (_, _) => WindowState = FormWindowState.Minimized, Theme.BgCardHover);
         var closeBtn = MakeIconButton(Theme.Glyph("\uE8BB", "×"), "Hide to tray (keeps running)", (_, _) => HideToTray(), Theme.Danger);
-        titleBar.Controls.Add(titleLbl);   // Fill first, then the right-docked buttons
+        titleBar.Controls.Add(titleLbl);
         titleBar.Controls.Add(_gearBtn);
         titleBar.Controls.Add(minBtn);
         titleBar.Controls.Add(closeBtn);
@@ -122,7 +136,7 @@ public sealed class MainForm : Form
             Cursor = Cursors.Hand
         };
         addBtn.FlatAppearance.BorderSize = 0;
-        addBtn.Click += (_, _) => OpenCardEditor(NewCardFromCurrentDevices(), true);
+        addBtn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
         var hintLbl = new Label
         {
             Text = "Click to switch · drag to reorder",
@@ -181,15 +195,19 @@ public sealed class MainForm : Form
         };
         _statusTimer.Tick += (_, _) => { _statusTimer.Stop(); _statusLabel.Text = "Ready"; _statusLabel.ForeColor = Theme.TextMuted; };
 
-        // Dock order: Fill first, then the edge panels (last added is docked first).
         Controls.Add(content);
         Controls.Add(_statusLabel);
         Controls.Add(actionBar);
         Controls.Add(nowPanel);
         Controls.Add(titleBar);
 
-        // ---- tray ----
+        // ---- dark tray menu ----
+        _trayMenu.Renderer = new DarkMenuRenderer();
+        _trayMenu.BackColor = Theme.BgCard;
+        _trayMenu.ForeColor = Theme.TextPrimary;
+        _trayMenu.Font = Theme.Body;
         _trayMenu.Opening += (_, _) => RebuildTrayMenu();
+
         _tray = new NotifyIcon
         {
             Icon = TrayIcons.Normal,
@@ -199,18 +217,58 @@ public sealed class MainForm : Form
         };
         _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowFromTray(); };
 
+        // ---- timers & system events ----
+        _debounceTimer.Tick += (_, _) => { _debounceTimer.Stop(); ProcessDebouncedAutoActivate(); };
+        _recoveryTimer.Tick += (_, _) =>
+        {
+            _recoveryTimer.Stop();
+            AppLog.Info("Recovering hotkeys and audio state after power/session event.");
+            RegisterAllHotKeys();
+            _ = ForceRefreshAsync();
+        };
+
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+
         // ---- go ----
-        RenderCards();            // also registers hotkeys
-        RefreshState(false);
-        _pollTimer.Tick += (_, _) => RefreshState(true);
+        RenderCards();
+        _ = RefreshStateAsync(false, force: true);
+        _pollTimer.Tick += (_, _) => _ = RefreshStateAsync(true);
         _pollTimer.Start();
 
         if (_store.LoadWarning != null) SetStatus(_store.LoadWarning, true);
     }
 
     // =========================================================================================
-    // Window plumbing
+    // Window plumbing & power/session recovery
     // =========================================================================================
+
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume) return;
+        ScheduleRecovery();
+    }
+
+    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.ConsoleConnect or SessionSwitchReason.RemoteConnect)
+            ScheduleRecovery();
+    }
+
+    private void ScheduleRecovery()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                _recoveryTimer.Stop();
+                _recoveryTimer.Start();
+            }));
+        }
+        catch { }
+    }
 
     protected override void SetVisibleCore(bool value)
     {
@@ -238,7 +296,6 @@ public sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Only intercept the user's own close; let Windows shutdown/logoff proceed.
         if (!_allowClose && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
@@ -246,8 +303,17 @@ public sealed class MainForm : Form
             return;
         }
 
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
+
         _pollTimer.Stop();
         _statusTimer.Stop();
+        _debounceTimer.Stop();
+        _recoveryTimer.Stop();
+        _pollTimer.Dispose();
+        _statusTimer.Dispose();
+        _debounceTimer.Dispose();
+        _recoveryTimer.Dispose();
         _hotKeys.Dispose();
         _osd.Close();
         _muteBanner.Close();
@@ -375,7 +441,7 @@ public sealed class MainForm : Form
             Cursor = Cursors.Hand
         };
         btn.FlatAppearance.BorderSize = 0;
-        btn.Click += (_, _) => OpenCardEditor(NewCardFromCurrentDevices(), true);
+        btn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
 
         t.Controls.Add(lbl, 0, 1);
         t.Controls.Add(btn, 0, 2);
@@ -420,6 +486,16 @@ public sealed class MainForm : Form
         }));
 
         AddHeader(t, "BEHAVIOR");
+        t.Controls.Add(MakeRowLabel("Fallback card on disconnect", 34));
+        _fallbackCombo = new DarkCombo { Size = new Size(140, 24), Anchor = AnchorStyles.Right };
+        _fallbackCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (_updatingFallbackCombo) return;
+            _config.FallbackCardId = (_fallbackCombo.SelectedItem as CardChoice)?.Id;
+            Save();
+        };
+        t.Controls.Add(_fallbackCombo);
+
         t.Controls.Add(MakeRowLabel("Play confirmation chime on switch"));
         t.Controls.Add(NewToggle(_config.ChimeEnabled, on => { _config.ChimeEnabled = on; Save(); }));
         t.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)"));
@@ -438,18 +514,18 @@ public sealed class MainForm : Form
             Cursor = Cursors.Hand
         };
         filterBtn.FlatAppearance.BorderColor = Theme.BgBorder;
-        filterBtn.Click += (_, _) => OpenDeviceFilterDialog();
+        filterBtn.Click += (_, _) => _ = OpenDeviceFilterDialogAsync();
         t.Controls.Add(filterBtn);
         t.SetColumnSpan(filterBtn, 2);
 
         var pathLbl = new Label
         {
-            Text = "Settings file:\n" + _store.FilePath,
+            Text = $"Settings: {_store.FilePath}\nLog: {AppLog.FilePath}",
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 52,
+            Height = 56,
             Margin = new Padding(0, 12, 0, 0)
         };
         t.Controls.Add(pathLbl);
@@ -457,7 +533,30 @@ public sealed class MainForm : Form
 
         panel.Controls.Add(t);
         UpdateHotKeyButtons();
+        RefreshFallbackCombo();
         return panel;
+    }
+
+    private void RefreshFallbackCombo()
+    {
+        if (_fallbackCombo == null) return;
+        _updatingFallbackCombo = true;
+        try
+        {
+            _fallbackCombo.Items.Clear();
+            _fallbackCombo.Items.Add(new CardChoice(null, "(None)"));
+            foreach (var c in _config.Cards)
+                _fallbackCombo.Items.Add(new CardChoice(c.Id, c.Name));
+
+            int idx = _config.FallbackCardId.HasValue
+                ? _config.Cards.FindIndex(c => c.Id == _config.FallbackCardId.Value) + 1
+                : 0;
+            _fallbackCombo.SelectedIndex = idx >= 0 && idx < _fallbackCombo.Items.Count ? idx : 0;
+        }
+        finally
+        {
+            _updatingFallbackCombo = false;
+        }
     }
 
     private static Label MakeRowLabel(string text, int height = 36) => new()
@@ -549,12 +648,13 @@ public sealed class MainForm : Form
         for (int i = 0; i < _config.Cards.Count; i++)
         {
             var cc = new CardControl(_config.Cards[i]) { SlotText = SlotFor(i) };
-            cc.ActivateRequested += ActivateCard;
-            cc.EditRequested += card => OpenCardEditor(card, false);
+            cc.ActivateRequested += card => _ = ActivateCardAsync(card);
+            cc.EditRequested += card => _ = OpenCardEditorAsync(card, false);
             cc.DeleteRequested += card =>
             {
                 _config.Cards.Remove(card);
                 if (_config.ActiveCardId == card.Id) _config.ActiveCardId = null;
+                if (_config.FallbackCardId == card.Id) _config.FallbackCardId = null;
                 Save();
                 QueueRender();
             };
@@ -563,14 +663,14 @@ public sealed class MainForm : Form
 
         ResizeCards();
         RefreshCardStates();
+        RefreshFallbackCombo();
         _cardsPanel.ResumeLayout(true);
         UpdateViews();
-        RegisterAllHotKeys(); // per-card hotkeys depend on how many cards exist
+        RegisterAllHotKeys();
     }
 
     private void QueueRender()
     {
-        // Deferred so we never dispose a card control from inside its own event handler.
         if (IsHandleCreated) BeginInvoke(new Action(RenderCards));
         else RenderCards();
     }
@@ -611,7 +711,30 @@ public sealed class MainForm : Form
         _nowOut.Text = _snap?.OutName ?? "No output device";
         _nowIn.Text = (_snap?.InName ?? "No input device") + (_micMuted ? "   ● MUTED" : "");
         _nowIn.ForeColor = _micMuted ? Theme.Danger : Theme.TextPrimary;
+        UpdateTrayTooltip();
     }
+
+    private void UpdateTrayTooltip()
+    {
+        var lines = new List<string>();
+        var activeCard = _snap != null ? _config.Cards.FirstOrDefault(c => CardIsActive(c, _snap)) : null;
+        lines.Add(activeCard != null ? $"Card: {Shorten(activeCard.Name, 30)}" : "AudioSwitcher");
+
+        if (!string.IsNullOrEmpty(_snap?.OutName))
+            lines.Add("Out: " + Shorten(_snap.OutName, 34));
+        if (!string.IsNullOrEmpty(_snap?.InName))
+            lines.Add("In: " + Shorten(_snap.InName, 28) + (_micMuted ? " [MUTED]" : ""));
+
+        var full = string.Join("\n", lines);
+        try { _tray.Text = Shorten(full, 127); }
+        catch
+        {
+            try { _tray.Text = Shorten(full, 63); } catch { }
+        }
+    }
+
+    private static string Shorten(string s, int max) =>
+        s.Length <= max ? s : s[..(max - 1)] + "…";
 
     // =========================================================================================
     // Drag to reorder
@@ -679,19 +802,21 @@ public sealed class MainForm : Form
         return card;
     }
 
-    private void OpenCardEditor(AudioCard card, bool isNew)
+    private async Task OpenCardEditorAsync(AudioCard card, bool isNew)
     {
         List<DeviceItem> outputs, inputs;
         try
         {
-            outputs = _audio.OutputItems();
-            inputs = _audio.InputItems();
+            (outputs, inputs) = await _audio.GetDeviceItemsAsync();
         }
         catch (Exception ex)
         {
+            AppLog.Error("Failed to list audio devices for card editor", ex);
             SetStatus("Couldn't list audio devices: " + ex.Message, true);
             return;
         }
+
+        if (IsDisposed) return;
 
         using var dlg = new CardEditorDialog(card, isNew, outputs, inputs);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -710,19 +835,21 @@ public sealed class MainForm : Form
         QueueRender();
     }
 
-    private void OpenDeviceFilterDialog()
+    private async Task OpenDeviceFilterDialogAsync()
     {
         List<DeviceItem> outputs, inputs;
         try
         {
-            outputs = _audio.OutputItems();
-            inputs = _audio.InputItems();
+            (outputs, inputs) = await _audio.GetDeviceItemsAsync();
         }
         catch (Exception ex)
         {
+            AppLog.Error("Failed to list audio devices for filter dialog", ex);
             SetStatus("Couldn't list audio devices: " + ex.Message, true);
             return;
         }
+
+        if (IsDisposed) return;
 
         using var dlg = new DeviceFilterDialog(outputs, inputs, _config.CycleOutputIds, _config.CycleInputIds);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -764,17 +891,16 @@ public sealed class MainForm : Form
         _ => "Toggle Mic Mute"
     };
 
-    /// <summary>Returns false (and tells the user) if any hotkey is owned by another app.</summary>
     private bool RegisterAllHotKeys()
     {
-        if (_capturing != null) return true; // hotkeys stay unregistered while rebinding
+        if (_capturing != null) return true;
 
         var items = new List<(string Name, HotKeyBinding Binding, Action Action)>
         {
-            ("Cycle Cards", _config.CardHotKey, CycleCard),
-            ("Cycle Output", _config.OutputHotKey, CycleOutput),
-            ("Cycle Input", _config.InputHotKey, CycleInput),
-            ("Toggle Mic Mute", _config.MuteHotKey, ToggleMicMute)
+            ("Cycle Cards", _config.CardHotKey, () => _ = CycleCardAsync()),
+            ("Cycle Output", _config.OutputHotKey, () => _ = CycleOutputAsync()),
+            ("Cycle Input", _config.InputHotKey, () => _ = CycleInputAsync()),
+            ("Toggle Mic Mute", _config.MuteHotKey, () => _ = ToggleMicMuteAsync())
         };
 
         if (_config.JumpHotKeysEnabled)
@@ -785,15 +911,17 @@ public sealed class MainForm : Form
                 int slot = i;
                 items.Add(($"Card {i + 1}",
                     new HotKeyBinding { Modifiers = _config.CardHotKey.Modifiers, Key = Keys.D1 + i },
-                    () => JumpToCard(slot)));
+                    () => _ = JumpToCardAsync(slot)));
             }
         }
 
         var failed = _hotKeys.RegisterAll(items);
         if (failed.Count == 0) return true;
 
-        SetStatus("Hotkey already used by another app: " + string.Join(", ", failed.Take(2)) +
-                  (failed.Count > 2 ? "…" : ""), true);
+        var msg = "Hotkey already used by another app: " + string.Join(", ", failed.Take(2)) +
+                  (failed.Count > 2 ? "…" : "");
+        AppLog.Warn(msg);
+        SetStatus(msg, true);
         return false;
     }
 
@@ -810,7 +938,7 @@ public sealed class MainForm : Form
     private void BeginCapture(HotKeyTarget target)
     {
         _capturing = target;
-        _hotKeys.UnregisterAll(); // so pressing an existing combo reaches us instead of triggering it
+        _hotKeys.UnregisterAll();
         UpdateHotKeyButtons();
         var btn = _hkButtons[target];
         btn.Text = "Press keys…";
@@ -839,7 +967,7 @@ public sealed class MainForm : Form
 
         var key = keyData & Keys.KeyCode;
         if (key is Keys.ControlKey or Keys.ShiftKey or Keys.Menu or Keys.LWin or Keys.RWin)
-            return true; // wait for the real key
+            return true;
 
         if (key == Keys.Escape)
         {
@@ -864,7 +992,7 @@ public sealed class MainForm : Form
         if (clash != null)
         {
             SetStatus($"{binding.Format()} is already used for \"{clash}\"", true);
-            return true; // stay in capture mode so the user can try another combo
+            return true;
         }
 
         SetBinding(target, binding);
@@ -894,7 +1022,7 @@ public sealed class MainForm : Form
     }
 
     // =========================================================================================
-    // Audio actions
+    // Audio actions (off UI thread)
     // =========================================================================================
 
     private static bool CardIsActive(AudioCard c, AudioSnapshot s) =>
@@ -910,41 +1038,63 @@ public sealed class MainForm : Form
             && (!c.InputId.HasValue || s.InputIds.Contains(c.InputId.Value));
     }
 
-    private void ActivateCard(AudioCard card)
+    private async Task ActivateCardAsync(AudioCard card, string? categoryOverride = null)
     {
         ApplyResult result;
         try
         {
-            result = _audio.Apply(card.OutputId, card.InputId);
+            result = await _audio.ApplyAsync(card.OutputId, card.OutputName, card.InputId, card.InputName);
         }
         catch (Exception ex)
         {
-            ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            AppLog.Error($"Failed to activate card '{card.Name}'", ex);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
             return;
+        }
+
+        if (IsDisposed) return;
+
+        // Auto-relink GUIDs if matched by name fallback
+        bool relinked = false;
+        if (result.ResolvedOutputId.HasValue)
+        {
+            card.OutputId = result.ResolvedOutputId.Value;
+            relinked = true;
+            AppLog.Info($"Re-linked output for card '{card.Name}' by name to {card.OutputId}.");
+        }
+        if (result.ResolvedInputId.HasValue)
+        {
+            card.InputId = result.ResolvedInputId.Value;
+            relinked = true;
+            AppLog.Info($"Re-linked input for card '{card.Name}' by name to {card.InputId}.");
         }
 
         if (!result.AnyApplied)
         {
+            AppLog.Warn($"Card '{card.Name}' unavailable: {result.Problem}");
             ShowFeedback("CARD UNAVAILABLE", $"{card.Name}: {result.Problem ?? "nothing to apply"}", Theme.Warning, false);
             return;
         }
 
         _config.ActiveCardId = card.Id;
         Save();
-        ForceRefresh();
+        if (relinked) RefreshCardStates();
+        await ForceRefreshAsync();
+
+        if (IsDisposed) return;
 
         if (result.Problem != null)
             ShowFeedback("CARD PARTLY ACTIVE", $"{card.Name}: {result.Problem}", Theme.Warning, false);
         else
-            ShowFeedback("CARD ACTIVE", card.Name, Theme.Accent, true);
+            ShowFeedback(categoryOverride ?? "CARD ACTIVE", card.Name, Theme.Accent, true);
+
+        AppLog.Info($"Activated card '{card.Name}' ({categoryOverride ?? "manual"}).");
     }
 
-    private void JumpToCard(int slot)
-    {
-        if (slot < _config.Cards.Count) ActivateCard(_config.Cards[slot]);
-    }
+    private Task JumpToCardAsync(int slot) =>
+        slot < _config.Cards.Count ? ActivateCardAsync(_config.Cards[slot]) : Task.CompletedTask;
 
-    private void CycleCard()
+    private async Task CycleCardAsync()
     {
         var cards = _config.Cards;
         if (cards.Count == 0)
@@ -959,63 +1109,72 @@ public sealed class MainForm : Form
         for (int step = 1; step <= cards.Count; step++)
         {
             var next = cards[(start + step) % cards.Count];
-            if (!CardIsAvailable(next)) continue; // skip cards whose devices are unplugged
-            ActivateCard(next);
+            if (!CardIsAvailable(next)) continue;
+            await ActivateCardAsync(next);
             return;
         }
         ShowFeedback("CARDS", "No card has all its devices connected", Theme.Warning, false);
     }
 
-    private void CycleOutput()
+    private async Task CycleOutputAsync()
     {
         try
         {
-            var next = _audio.CycleOutput(_config.CycleOutputIds);
+            var next = await _audio.CycleOutputAsync(_config.CycleOutputIds);
+            if (IsDisposed) return;
             if (next == null)
             {
                 ShowFeedback("OUTPUT", "Fewer than two devices to cycle through", Theme.Warning, false);
                 return;
             }
-            ForceRefresh();
-            ShowFeedback("OUTPUT", next.FullName, Theme.Accent, true);
+            await ForceRefreshAsync();
+            ShowFeedback("OUTPUT", next.Name, Theme.Accent, true);
+            AppLog.Info($"Cycled output to '{next.Name}'.");
         }
         catch (Exception ex)
         {
-            ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            AppLog.Error("CycleOutput failed", ex);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
         }
     }
 
-    private void CycleInput()
+    private async Task CycleInputAsync()
     {
         try
         {
-            var next = _audio.CycleInput(_config.CycleInputIds);
+            var next = await _audio.CycleInputAsync(_config.CycleInputIds);
+            if (IsDisposed) return;
             if (next == null)
             {
                 ShowFeedback("INPUT", "Fewer than two devices to cycle through", Theme.Warning, false);
                 return;
             }
-            ForceRefresh();
-            ShowFeedback("INPUT", next.FullName, Theme.Accent, true);
+            await ForceRefreshAsync();
+            ShowFeedback("INPUT", next.Name, Theme.Accent, true);
+            AppLog.Info($"Cycled input to '{next.Name}'.");
         }
         catch (Exception ex)
         {
-            ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            AppLog.Error("CycleInput failed", ex);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
         }
     }
 
-    private void ToggleMicMute()
+    private async Task ToggleMicMuteAsync()
     {
         bool? muted;
         try
         {
-            muted = _audio.ToggleMute();
+            muted = await _audio.ToggleMuteAsync();
         }
         catch (Exception ex)
         {
-            ShowFeedback("MICROPHONE", ex.Message, Theme.Danger, false);
+            AppLog.Error("ToggleMicMute failed", ex);
+            if (!IsDisposed) ShowFeedback("MICROPHONE", ex.Message, Theme.Danger, false);
             return;
         }
+
+        if (IsDisposed) return;
 
         if (muted == null)
         {
@@ -1023,10 +1182,11 @@ public sealed class MainForm : Form
             return;
         }
 
-        ForceRefresh();
-        ApplyMuteUi(muted.Value); // don't wait for the driver to report the new state
+        await ForceRefreshAsync();
+        ApplyMuteUi(muted.Value);
         ShowFeedback("MICROPHONE", muted.Value ? "Muted" : "Live (Unmuted)",
             muted.Value ? Theme.Danger : Theme.Success, false);
+        AppLog.Info($"Mic mute toggled -> {(muted.Value ? "Muted" : "Live")}.");
     }
 
     private void ShowFeedback(string category, string title, Color accent, bool playChime)
@@ -1037,32 +1197,164 @@ public sealed class MainForm : Form
     }
 
     // =========================================================================================
-    // Live state (polling) and auto-activation
+    // Live state (polling), name re-linking, debounced auto-activate & fallback card
     // =========================================================================================
 
-    private void ForceRefresh()
+    private Task ForceRefreshAsync()
     {
         _lastSignature = "";
-        RefreshState(false);
+        return RefreshStateAsync(false, force: true);
     }
 
-    private void RefreshState(bool allowAutoActivate)
+    private async Task RefreshStateAsync(bool allowAutoEvents, bool force = false)
     {
-        AudioSnapshot snap;
-        try { snap = _audio.Snapshot(); }
-        catch { return; }
+        if (_polling && !force) return;
+        _polling = true;
+        try
+        {
+            var snap = await _audio.SnapshotAsync();
+            if (IsDisposed) return;
 
-        var signature = snap.Signature;
-        if (signature == _lastSignature) return;
+            var signature = snap.Signature;
+            if (signature == _lastSignature) return;
 
-        var previous = _snap;
-        _snap = snap;
-        _lastSignature = signature;
+            var previous = _snap;
+            _snap = snap;
+            _lastSignature = signature;
 
-        ApplyMuteUi(snap.MicMuted);
-        RefreshCardStates();
+            RelinkCardsByName(snap);
+            ApplyMuteUi(snap.MicMuted);
+            RefreshCardStates();
 
-        if (allowAutoActivate && previous != null) AutoActivateForNewDevices(previous, snap);
+            if (allowAutoEvents && previous != null)
+            {
+                HandleDeviceChanges(previous, snap);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Snapshot refresh failed", ex);
+        }
+        finally
+        {
+            _polling = false;
+        }
+    }
+
+    private void RelinkCardsByName(AudioSnapshot snap)
+    {
+        bool changed = false;
+        foreach (var card in _config.Cards)
+        {
+            if (card.OutputId.HasValue && !snap.OutputIds.Contains(card.OutputId.Value) &&
+                !string.IsNullOrWhiteSpace(card.OutputName) && !card.OutputName.Equals("None", StringComparison.OrdinalIgnoreCase))
+            {
+                var match = snap.OutputNames.FirstOrDefault(kv => kv.Value.Equals(card.OutputName, StringComparison.OrdinalIgnoreCase));
+                if (match.Key != Guid.Empty)
+                {
+                    card.OutputId = match.Key;
+                    changed = true;
+                    AppLog.Info($"Auto-relinked card '{card.Name}' output by name to {match.Key}.");
+                }
+            }
+
+            if (card.InputId.HasValue && !snap.InputIds.Contains(card.InputId.Value) &&
+                !string.IsNullOrWhiteSpace(card.InputName) && !card.InputName.Equals("None", StringComparison.OrdinalIgnoreCase))
+            {
+                var match = snap.InputNames.FirstOrDefault(kv => kv.Value.Equals(card.InputName, StringComparison.OrdinalIgnoreCase));
+                if (match.Key != Guid.Empty)
+                {
+                    card.InputId = match.Key;
+                    changed = true;
+                    AppLog.Info($"Auto-relinked card '{card.Name}' input by name to {match.Key}.");
+                }
+            }
+        }
+        if (changed) Save();
+    }
+
+    private void HandleDeviceChanges(AudioSnapshot previous, AudioSnapshot now)
+    {
+        var newIds = new HashSet<Guid>(now.OutputIds.Except(previous.OutputIds));
+        newIds.UnionWith(now.InputIds.Except(previous.InputIds));
+
+        var removedIds = new HashSet<Guid>(previous.OutputIds.Except(now.OutputIds));
+        removedIds.UnionWith(previous.InputIds.Except(now.InputIds));
+
+        // 1. Debounced auto-activate for newly connected devices (with flapping guard)
+        if (newIds.Count > 0)
+        {
+            var cutoff = DateTime.UtcNow.AddSeconds(-30);
+            foreach (var id in newIds)
+            {
+                if (!_connectHistory.TryGetValue(id, out var q))
+                    _connectHistory[id] = q = new Queue<DateTime>();
+
+                while (q.Count > 0 && q.Peek() < cutoff) q.Dequeue();
+                q.Enqueue(DateTime.UtcNow);
+
+                if (q.Count >= 3)
+                {
+                    AppLog.Warn($"Ignoring flapping device {id} ({q.Count} connects in 30s).");
+                    continue;
+                }
+                _pendingNewDevices.Add(id);
+            }
+
+            if (_pendingNewDevices.Count > 0)
+            {
+                _debounceTimer.Stop();
+                _debounceTimer.Start();
+            }
+        }
+
+        // 2. Fallback card if the active card's device disconnected
+        if (removedIds.Count > 0 && _config.FallbackCardId.HasValue)
+        {
+            var activeCard = _config.Cards.FirstOrDefault(c => c.Id == _config.ActiveCardId)
+                ?? _config.Cards.FirstOrDefault(c => CardIsActive(c, previous));
+
+            if (activeCard != null && activeCard.Id != _config.FallbackCardId.Value)
+            {
+                bool lostDevice =
+                    (activeCard.OutputId.HasValue && removedIds.Contains(activeCard.OutputId.Value)) ||
+                    (activeCard.InputId.HasValue && removedIds.Contains(activeCard.InputId.Value));
+
+                if (lostDevice)
+                {
+                    var fallback = _config.Cards.FirstOrDefault(c => c.Id == _config.FallbackCardId.Value);
+                    if (fallback != null && CardIsAvailable(fallback) && !CardIsActive(fallback, now))
+                    {
+                        AppLog.Info($"Active card '{activeCard.Name}' lost a device; switching to fallback '{fallback.Name}'.");
+                        _ = ActivateCardAsync(fallback, "FALLBACK ACTIVE");
+                    }
+                }
+            }
+        }
+    }
+
+    private void ProcessDebouncedAutoActivate()
+    {
+        if (_snap == null || _pendingNewDevices.Count == 0) return;
+
+        var stillConnected = _pendingNewDevices
+            .Where(id => _snap.OutputIds.Contains(id) || _snap.InputIds.Contains(id))
+            .ToHashSet();
+        _pendingNewDevices.Clear();
+
+        if (stillConnected.Count == 0) return;
+
+        foreach (var c in _config.Cards)
+        {
+            if (!c.AutoActivate || !CardIsAvailable(c) || CardIsActive(c, _snap)) continue;
+            bool touchesNew =
+                (c.OutputId.HasValue && stillConnected.Contains(c.OutputId.Value)) ||
+                (c.InputId.HasValue && stillConnected.Contains(c.InputId.Value));
+            if (!touchesNew) continue;
+
+            _ = ActivateCardAsync(c, "AUTO-SWITCHED");
+            break;
+        }
     }
 
     private void ApplyMuteUi(bool muted)
@@ -1072,25 +1364,6 @@ public sealed class MainForm : Form
         else _muteBanner.Hide();
         _tray.Icon = muted ? TrayIcons.Muted : TrayIcons.Normal;
         UpdateNow();
-    }
-
-    private void AutoActivateForNewDevices(AudioSnapshot previous, AudioSnapshot now)
-    {
-        var newIds = new HashSet<Guid>(now.OutputIds.Except(previous.OutputIds));
-        newIds.UnionWith(now.InputIds.Except(previous.InputIds));
-        if (newIds.Count == 0) return;
-
-        foreach (var c in _config.Cards)
-        {
-            if (!c.AutoActivate || !CardIsAvailable(c) || CardIsActive(c, now)) continue;
-            bool touchesNewDevice =
-                (c.OutputId.HasValue && newIds.Contains(c.OutputId.Value)) ||
-                (c.InputId.HasValue && newIds.Contains(c.InputId.Value));
-            if (!touchesNewDevice) continue;
-
-            ActivateCard(c);
-            break;
-        }
     }
 
     // =========================================================================================
@@ -1119,13 +1392,13 @@ public sealed class MainForm : Form
                     Checked = _snap != null && CardIsActive(c, _snap),
                     Enabled = CardIsAvailable(c)
                 };
-                mi.Click += (_, _) => ActivateCard(c);
+                mi.Click += (_, _) => _ = ActivateCardAsync(c);
                 items.Add(mi);
             }
         }
 
         items.Add(new ToolStripSeparator());
-        items.Add("Toggle Mic Mute", null, (_, _) => ToggleMicMute());
+        items.Add("Toggle Mic Mute", null, (_, _) => _ = ToggleMicMuteAsync());
         items.Add("Exit", null, (_, _) => { _allowClose = true; Close(); });
     }
 
@@ -1159,6 +1432,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            AppLog.Error("Failed to update Windows startup registry key", ex);
             SetStatus("Couldn't change the startup setting: " + ex.Message, true);
         }
     }

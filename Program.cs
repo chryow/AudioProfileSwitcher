@@ -7,6 +7,16 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => HandleCrash("UI thread", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            HandleCrash("AppDomain", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Error("Unobserved task exception", e.Exception);
+            e.SetObserved();
+        };
+
         // Single instance: a second launch just asks the first one to show its window.
         using var mutex = new Mutex(true, @"Local\AudioProfileSwitcher.Instance", out bool isFirst);
         using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\AudioProfileSwitcher.Show");
@@ -15,6 +25,8 @@ static class Program
             showEvent.Set();
             return;
         }
+
+        AppLog.Info("AudioProfileSwitcher starting.");
 
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
@@ -40,6 +52,21 @@ static class Program
         listener.Start();
 
         Application.Run(form);
+        AppLog.Info("AudioProfileSwitcher exited cleanly.");
+    }
+
+    private static void HandleCrash(string source, Exception? ex)
+    {
+        AppLog.Error($"Unhandled exception ({source})", ex);
+        try
+        {
+            MessageBox.Show(
+                $"AudioSwitcher ran into an unexpected error:\n\n{ex?.Message ?? "Unknown error"}\n\nDetails were written to:\n{AppLog.FilePath}",
+                "AudioSwitcher Error",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        catch { }
     }
 }
 

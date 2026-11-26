@@ -8,6 +8,8 @@ namespace AudioProfileSwitcher;
 public sealed record AudioSnapshot(
     HashSet<Guid> OutputIds,
     HashSet<Guid> InputIds,
+    Dictionary<Guid, string> OutputNames,
+    Dictionary<Guid, string> InputNames,
     Guid? DefaultOut,
     Guid? DefaultIn,
     string? OutName,
@@ -21,12 +23,18 @@ public sealed record AudioSnapshot(
         $"|{DefaultOut}|{DefaultIn}|{MicMuted}|{OutName}|{InName}";
 }
 
-public readonly record struct ApplyResult(bool AnyApplied, string? Problem);
+public readonly record struct ApplyResult(
+    bool AnyApplied,
+    string? Problem,
+    Guid? ResolvedOutputId = null,
+    Guid? ResolvedInputId = null);
 
-/// <summary>All Core Audio access lives here so the UI never touches the library directly.</summary>
+/// <summary>All Core Audio access lives here, serialized off the UI thread.</summary>
 public sealed class AudioService : IDisposable
 {
     private readonly CoreAudioController _audio = new();
+    private readonly object _lock = new();
+    private bool _disposed;
 
     private List<CoreAudioDevice> Outputs() =>
         _audio.GetPlaybackDevices(DeviceState.Active)
@@ -36,22 +44,38 @@ public sealed class AudioService : IDisposable
         _audio.GetCaptureDevices(DeviceState.Active)
               .OrderBy(d => d.FullName, StringComparer.CurrentCultureIgnoreCase).ToList();
 
-    public List<DeviceItem> OutputItems() => Outputs().Select(d => new DeviceItem(d.Id, d.FullName)).ToList();
-    public List<DeviceItem> InputItems() => Inputs().Select(d => new DeviceItem(d.Id, d.FullName)).ToList();
+    public Task<(List<DeviceItem> Outputs, List<DeviceItem> Inputs)> GetDeviceItemsAsync() =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                if (_disposed) return (new List<DeviceItem>(), new List<DeviceItem>());
+                return (
+                    Outputs().Select(d => new DeviceItem(d.Id, d.FullName)).ToList(),
+                    Inputs().Select(d => new DeviceItem(d.Id, d.FullName)).ToList()
+                );
+            }
+        });
 
-    public AudioSnapshot Snapshot()
-    {
-        var outs = Outputs();
-        var ins = Inputs();
-        var dOut = _audio.DefaultPlaybackDevice;
-        var dIn = _audio.DefaultCaptureDevice;
-        return new AudioSnapshot(
-            outs.Select(d => d.Id).ToHashSet(),
-            ins.Select(d => d.Id).ToHashSet(),
-            dOut?.Id, dIn?.Id,
-            dOut?.FullName, dIn?.FullName,
-            dIn?.IsMuted ?? false);
-    }
+    public Task<AudioSnapshot> SnapshotAsync() =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                var outs = Outputs();
+                var ins = Inputs();
+                var dOut = _audio.DefaultPlaybackDevice;
+                var dIn = _audio.DefaultCaptureDevice;
+                return new AudioSnapshot(
+                    outs.Select(d => d.Id).ToHashSet(),
+                    ins.Select(d => d.Id).ToHashSet(),
+                    outs.ToDictionary(d => d.Id, d => d.FullName),
+                    ins.ToDictionary(d => d.Id, d => d.FullName),
+                    dOut?.Id, dIn?.Id,
+                    dOut?.FullName, dIn?.FullName,
+                    dIn?.IsMuted ?? false);
+            }
+        });
 
     private static void SetDefault(CoreAudioDevice d)
     {
@@ -59,33 +83,89 @@ public sealed class AudioService : IDisposable
         d.SetAsDefaultCommunications();
     }
 
-    public ApplyResult Apply(Guid? outputId, Guid? inputId)
+    private static CoreAudioDevice? FindDevice(List<CoreAudioDevice> list, Guid id, string? savedName, out bool matchedByName)
     {
-        var problems = new List<string>();
-        bool any = false;
+        matchedByName = false;
+        var exact = list.FirstOrDefault(x => x.Id == id);
+        if (exact != null) return exact;
 
-        if (outputId.HasValue)
+        if (!string.IsNullOrWhiteSpace(savedName) && !savedName.Equals("None", StringComparison.OrdinalIgnoreCase))
         {
-            var d = Outputs().FirstOrDefault(x => x.Id == outputId.Value);
-            if (d == null) problems.Add("output not connected");
-            else { SetDefault(d); any = true; }
+            var byName = list.FirstOrDefault(x => x.FullName.Equals(savedName, StringComparison.OrdinalIgnoreCase));
+            if (byName != null)
+            {
+                matchedByName = true;
+                return byName;
+            }
         }
-
-        if (inputId.HasValue)
-        {
-            var d = Inputs().FirstOrDefault(x => x.Id == inputId.Value);
-            if (d == null) problems.Add("input not connected");
-            else { SetDefault(d); any = true; }
-        }
-
-        return new ApplyResult(any, problems.Count == 0 ? null : string.Join(", ", problems));
+        return null;
     }
 
-    public CoreAudioDevice? CycleOutput(IReadOnlyCollection<Guid> filter) =>
-        Cycle(Outputs(), _audio.DefaultPlaybackDevice, filter);
+    public Task<ApplyResult> ApplyAsync(Guid? outputId, string? outputName, Guid? inputId, string? inputName) =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                if (_disposed) return new ApplyResult(false, "audio service closed");
 
-    public CoreAudioDevice? CycleInput(IReadOnlyCollection<Guid> filter) =>
-        Cycle(Inputs(), _audio.DefaultCaptureDevice, filter);
+                var problems = new List<string>();
+                bool any = false;
+                Guid? resolvedOut = null;
+                Guid? resolvedIn = null;
+
+                if (outputId.HasValue)
+                {
+                    var d = FindDevice(Outputs(), outputId.Value, outputName, out bool byName);
+                    if (d == null)
+                    {
+                        problems.Add("output not connected");
+                    }
+                    else
+                    {
+                        SetDefault(d);
+                        any = true;
+                        if (byName) resolvedOut = d.Id;
+                    }
+                }
+
+                if (inputId.HasValue)
+                {
+                    var d = FindDevice(Inputs(), inputId.Value, inputName, out bool byName);
+                    if (d == null)
+                    {
+                        problems.Add("input not connected");
+                    }
+                    else
+                    {
+                        SetDefault(d);
+                        any = true;
+                        if (byName) resolvedIn = d.Id;
+                    }
+                }
+
+                return new ApplyResult(any, problems.Count == 0 ? null : string.Join(", ", problems), resolvedOut, resolvedIn);
+            }
+        });
+
+    public Task<DeviceItem?> CycleOutputAsync(IReadOnlyCollection<Guid> filter) =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                var next = Cycle(Outputs(), _audio.DefaultPlaybackDevice, filter);
+                return next == null ? null : new DeviceItem(next.Id, next.FullName);
+            }
+        });
+
+    public Task<DeviceItem?> CycleInputAsync(IReadOnlyCollection<Guid> filter) =>
+        Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                var next = Cycle(Inputs(), _audio.DefaultCaptureDevice, filter);
+                return next == null ? null : new DeviceItem(next.Id, next.FullName);
+            }
+        });
 
     private static CoreAudioDevice? Cycle(List<CoreAudioDevice> all, CoreAudioDevice? current, IReadOnlyCollection<Guid> filter)
     {
@@ -99,16 +179,28 @@ public sealed class AudioService : IDisposable
     }
 
     /// <summary>Returns the new muted state, or null when there is no default microphone.</summary>
-    public bool? ToggleMute()
-    {
-        var mic = _audio.DefaultCaptureDevice;
-        if (mic == null) return null;
-        bool nowMuted = !mic.IsMuted;
-        mic.Mute(nowMuted);
-        return nowMuted;
-    }
+    public Task<bool?> ToggleMuteAsync() =>
+        Task.Run<bool?>(() =>
+        {
+            lock (_lock)
+            {
+                var mic = _audio.DefaultCaptureDevice;
+                if (mic == null) return null;
+                bool nowMuted = !mic.IsMuted;
+                mic.Mute(nowMuted);
+                return nowMuted;
+            }
+        });
 
-    public void Dispose() => _audio.Dispose();
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _audio.Dispose();
+        }
+    }
 }
 
 internal sealed class HotKeyService : NativeWindow, IDisposable
@@ -156,7 +248,8 @@ internal sealed class HotKeyService : NativeWindow, IDisposable
     {
         if (m.Msg == WM_HOTKEY && _actions.TryGetValue(m.WParam.ToInt32(), out var action))
         {
-            try { action(); } catch { /* never let a hotkey handler crash the message loop */ }
+            try { action(); }
+            catch (Exception ex) { AppLog.Error("Hotkey handler failed", ex); }
         }
         base.WndProc(ref m);
     }
@@ -183,7 +276,10 @@ internal static class ChimePlayer
                 using var player = new SoundPlayer(ms);
                 player.PlaySync();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                AppLog.Error("Chime playback failed", ex);
+            }
         });
     }
 
