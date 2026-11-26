@@ -551,4 +551,76 @@ public sealed class AudioProfileSwitcherTests
         Assert.DoesNotContain("\n", dest.Cards[0].Name);
         Assert.Equal("Speakers(DAC)", dest.Cards[0].OutputName);
     }
+
+    [Fact]
+    public void BuildVoiceCommandMap_BuildsCardNameSlotAndSystemCommands()
+    {
+        var desk = new AudioCard { Name = "Desk (USB) + DAC" };
+        var headset = new AudioCard { Name = "Headset" };
+
+        var map = ProfileLogic.BuildVoiceCommandMap("Hey, Audio!", new[] { desk, headset });
+
+        Assert.Equal(desk.Id, map["Hey Audio switch to Desk USB DAC"].CardId);
+        Assert.Equal(desk.Id, map["Hey Audio Desk USB DAC"].CardId);
+        Assert.Equal(desk.Id, map["Hey Audio card 1"].CardId);
+        Assert.Equal(headset.Id, map["Hey Audio switch to Headset"].CardId);
+        Assert.Equal(headset.Id, map["Hey Audio card 2"].CardId);
+
+        Assert.Equal(VoiceCommandKind.CycleCard, map["Hey Audio next card"].Kind);
+        Assert.Equal(VoiceCommandKind.MuteMic, map["Hey Audio mute mic"].Kind);
+        Assert.Equal(VoiceCommandKind.UnmuteMic, map["Hey Audio unmute mic"].Kind);
+        Assert.Equal(VoiceCommandKind.ShowWindow, map["Hey Audio show window"].Kind);
+        Assert.Equal(VoiceCommandKind.HideWindow, map["Hey Audio hide window"].Kind);
+
+        Assert.Equal("Audio", ProfileLogic.SanitizeWakePhrase("   !!!  "));
+    }
+
+    [Fact]
+    public void ResampleTo16kMonoPcm16_Downsamples48kStereoFloatCleanly()
+    {
+        // Generate 100 ms of 48 kHz stereo IEEE float32 at 400 Hz (4800 frames -> 1600 frames at 16 kHz)
+        const int srcRate = 48000;
+        const int srcFrames = 4800;
+        var input = new byte[srcFrames * 2 * 4];
+
+        for (int i = 0; i < srcFrames; i++)
+        {
+            float sample = (float)(0.5 * Math.Sin(2.0 * Math.PI * 400.0 * i / srcRate));
+            Buffer.BlockCopy(BitConverter.GetBytes(sample), 0, input, i * 8, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(sample), 0, input, i * 8 + 4, 4);
+        }
+
+        var pcm16 = ProfileLogic.ResampleTo16kMonoPcm16(input, srcRate, channels: 2, bitsPerSample: 32, isIeeeFloat: true);
+        Assert.Equal(1600 * 2, pcm16.Length);
+
+        // Peak amplitude should be close to 0.5 * 32767 = 16383
+        short maxAbs = 0;
+        for (int i = 0; i < pcm16.Length; i += 2)
+        {
+            short v = BitConverter.ToInt16(pcm16, i);
+            short a = v == short.MinValue ? short.MaxValue : Math.Abs(v);
+            if (a > maxAbs) maxAbs = a;
+        }
+        Assert.InRange(maxAbs, 15500, 16500);
+    }
+
+    [Fact]
+    public void RelinkByName_RelinksPinnedVoiceMicrophoneGuid()
+    {
+        var oldMic = Guid.NewGuid();
+        var newMic = Guid.NewGuid();
+
+        var cfg = new AppConfig
+        {
+            VoiceInputDeviceId = oldMic,
+            VoiceInputDeviceName = "Microphone (Blue Yeti)"
+        };
+        var snap = MakeSnapshot(
+            inputs: new[] { (newMic, "Microphone (Blue Yeti)") },
+            defaultIn: newMic);
+
+        bool changed = ProfileLogic.RelinkByName(cfg, snap);
+        Assert.True(changed);
+        Assert.Equal(newMic, cfg.VoiceInputDeviceId);
+    }
 }
