@@ -94,6 +94,20 @@ internal static class Native
         try { DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); } catch { }
     }
 
+    /// <summary>Subtle small-radius rounded corners on Windows 11 for floating pills.</summary>
+    public static void RoundCornersSmall(IntPtr hwnd)
+    {
+        int round = 3; // DWMWCP_ROUNDSMALL
+        try { DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); } catch { }
+    }
+
+    /// <summary>Tints the native Windows 11 DWM border (ignored on Windows 10).</summary>
+    public static void SetBorderColor(IntPtr hwnd, Color color)
+    {
+        int colorRef = color.R | (color.G << 8) | (color.B << 16);
+        try { DwmSetWindowAttribute(hwnd, 34, ref colorRef, sizeof(int)); } catch { }
+    }
+
     public static void DragWindow(IntPtr hwnd)
     {
         ReleaseCapture();

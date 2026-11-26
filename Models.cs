@@ -5,7 +5,7 @@ namespace AudioProfileSwitcher;
 
 public static class AppInfo
 {
-    public const string Version = "1.3.0";
+    public const string Version = "1.4.0";
     public const string ReleasesPageUrl = "https://github.com/chryow/AudioProfileSwitcher/releases";
     public const string LatestReleaseApiUrl = "https://api.github.com/repos/chryow/AudioProfileSwitcher/releases/latest";
 }
