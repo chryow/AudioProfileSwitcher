@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Win32;
 
 namespace AudioProfileSwitcher;
@@ -16,7 +17,9 @@ public sealed class MainForm : Form
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu = new();
     private readonly ToolTip _tip = new();
-    private readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 1500 };
+    private readonly SingleFlightCoalescer _refreshCoalescer;
+    private readonly System.Windows.Forms.Timer _eventCoalesceTimer = new() { Interval = 120 };
+    private readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 45_000 };
     private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 6000 };
     private readonly System.Windows.Forms.Timer _debounceTimer = new() { Interval = 2000 };
     private readonly System.Windows.Forms.Timer _recoveryTimer = new() { Interval = 1000 };
@@ -32,6 +35,7 @@ public sealed class MainForm : Form
     private readonly Dictionary<HotKeyTarget, Button> _hkButtons = new();
     private Label _jumpLabel = null!;
     private DarkCombo _fallbackCombo = null!;
+    private DarkCombo _muteBannerPosCombo = null!;
 
     // Auto-activate debounce & flapping guard
     private readonly HashSet<Guid> _pendingNewDevices = new();
@@ -39,18 +43,22 @@ public sealed class MainForm : Form
 
     private bool _settingsOpen;
     private bool _updatingFallbackCombo;
-    private bool _polling;
+    private bool _updatingBannerPosCombo;
     private HotKeyTarget? _capturing;
     private AudioSnapshot? _snap;
-    private string _lastSignature = "";
     private bool _micMuted;
     private bool _allowClose;
     private int _dropIndex = -1;
     private int _dropLineY = -1;
 
-    private sealed record CardChoice(Guid? Id, string Name)
+    private sealed record FallbackChoice(FallbackMode Mode, Guid? CardId, string Label)
     {
-        public override string ToString() => Name;
+        public override string ToString() => Label;
+    }
+
+    private sealed record BannerPosChoice(MuteBannerPosition Position, string Label)
+    {
+        public override string ToString() => Label;
     }
 
     public MainForm(bool startMinimized = false)
@@ -58,16 +66,17 @@ public sealed class MainForm : Form
         _startMinimized = startMinimized;
         _config = _store.Load();
         _hotKeys = new HotKeyService();
+        _refreshCoalescer = new SingleFlightCoalescer(ExecuteRefreshPassAsync);
 
         // ---- window ----
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "AudioSwitcher";
-        Icon = TrayIcons.Normal;
+        Icon = TrayIcons.AppWindow;
         Size = new Size(380, 620);
         MinimumSize = new Size(380, 620);
         FormBorderStyle = FormBorderStyle.None;
-        StartPosition = FormStartPosition.CenterScreen;
+        RestoreWindowLocation();
         BackColor = Theme.BgMain;
         ForeColor = Theme.TextPrimary;
         Padding = new Padding(1); // room for the painted border
@@ -84,7 +93,12 @@ public sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(16, 0, 0, 0)
         };
-        MouseEventHandler drag = (_, e) => { if (e.Button == MouseButtons.Left) Native.DragWindow(Handle); };
+        MouseEventHandler drag = (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            Native.DragWindow(Handle);
+            CaptureWindowLocation(persist: true);
+        };
         titleBar.MouseDown += drag;
         titleLbl.MouseDown += drag;
 
@@ -139,7 +153,7 @@ public sealed class MainForm : Form
         addBtn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
         var hintLbl = new Label
         {
-            Text = "Click to switch · drag to reorder",
+            Text = "Click to switch · right-click for menu",
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
             AutoSize = true,
@@ -163,7 +177,15 @@ public sealed class MainForm : Form
         _cardsPanel.ClientSizeChanged += (_, _) => ResizeCards();
         _cardsPanel.DragEnter += OnCardsDragEnter;
         _cardsPanel.DragOver += OnCardsDragOver;
-        _cardsPanel.DragLeave += (_, _) => { _dropLineY = -1; _dropIndex = -1; _cardsPanel.Invalidate(); };
+        _cardsPanel.DragLeave += (_, _) =>
+        {
+            if (_dropLineY >= 0 || _dropIndex >= 0)
+            {
+                _dropLineY = -1;
+                _dropIndex = -1;
+                _cardsPanel.Invalidate();
+            }
+        };
         _cardsPanel.DragDrop += OnCardsDragDrop;
         _cardsPanel.Paint += (_, e) =>
         {
@@ -217,13 +239,20 @@ public sealed class MainForm : Form
         };
         _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowFromTray(); };
 
-        // ---- timers & system events ----
+        // ---- timers, CoreAudio events & system events ----
+        _eventCoalesceTimer.Tick += (_, _) =>
+        {
+            _eventCoalesceTimer.Stop();
+            _ = RefreshStateAsync(allowAutoEvents: true);
+        };
+        _audio.StateChanged += OnCoreAudioStateChanged;
+
         _debounceTimer.Tick += (_, _) => { _debounceTimer.Stop(); ProcessDebouncedAutoActivate(); };
         _recoveryTimer.Tick += (_, _) =>
         {
             _recoveryTimer.Stop();
             AppLog.Info("Recovering hotkeys and audio state after power/session event.");
-            RegisterAllHotKeys();
+            RegisterAllHotKeys(force: true);
             _ = ForceRefreshAsync();
         };
 
@@ -232,16 +261,75 @@ public sealed class MainForm : Form
 
         // ---- go ----
         RenderCards();
-        _ = RefreshStateAsync(false, force: true);
-        _pollTimer.Tick += (_, _) => _ = RefreshStateAsync(true);
+        _ = RefreshStateAsync(allowAutoEvents: false, force: true);
+        _pollTimer.Tick += (_, _) => _ = RefreshStateAsync(allowAutoEvents: true);
         _pollTimer.Start();
 
         if (_store.LoadWarning != null) SetStatus(_store.LoadWarning, true);
     }
 
     // =========================================================================================
-    // Window plumbing & power/session recovery
+    // Window plumbing, saved coordinates & power/session recovery
     // =========================================================================================
+
+    private void RestoreWindowLocation()
+    {
+        if (!_config.WindowX.HasValue || !_config.WindowY.HasValue)
+        {
+            StartPosition = FormStartPosition.CenterScreen;
+            return;
+        }
+
+        try
+        {
+            var areas = Screen.AllScreens.Select(s => s.WorkingArea).ToList();
+            if (areas.Count == 0)
+            {
+                StartPosition = FormStartPosition.CenterScreen;
+                return;
+            }
+
+            StartPosition = FormStartPosition.Manual;
+            Location = ProfileLogic.ClampWindowLocation(
+                new Point(_config.WindowX.Value, _config.WindowY.Value),
+                Size,
+                areas);
+        }
+        catch
+        {
+            StartPosition = FormStartPosition.CenterScreen;
+        }
+    }
+
+    private void CaptureWindowLocation(bool persist)
+    {
+        if (WindowState != FormWindowState.Normal || !IsHandleCreated) return;
+        if (_config.WindowX == Location.X && _config.WindowY == Location.Y) return;
+        _config.WindowX = Location.X;
+        _config.WindowY = Location.Y;
+        if (persist) Save();
+    }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        base.OnResizeEnd(e);
+        CaptureWindowLocation(persist: true);
+    }
+
+    private void OnCoreAudioStateChanged()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                _eventCoalesceTimer.Stop();
+                _eventCoalesceTimer.Start();
+            }));
+        }
+        catch { /* closing */ }
+    }
 
     private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
@@ -303,13 +391,18 @@ public sealed class MainForm : Form
             return;
         }
 
+        CaptureWindowLocation(persist: true);
+
+        _audio.StateChanged -= OnCoreAudioStateChanged;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
 
+        _eventCoalesceTimer.Stop();
         _pollTimer.Stop();
         _statusTimer.Stop();
         _debounceTimer.Stop();
         _recoveryTimer.Stop();
+        _eventCoalesceTimer.Dispose();
         _pollTimer.Dispose();
         _statusTimer.Dispose();
         _debounceTimer.Dispose();
@@ -327,6 +420,7 @@ public sealed class MainForm : Form
 
     private void HideToTray()
     {
+        CaptureWindowLocation(persist: true);
         Hide();
         if (!_config.TrayHintShown)
         {
@@ -467,7 +561,7 @@ public sealed class MainForm : Form
             BackColor = Theme.BgCard
         };
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 146));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 152));
 
         AddHeader(t, "GLOBAL HOTKEYS (CLICK TO REBIND)");
         AddHotKeyRow(t, "Cycle Cards", HotKeyTarget.Card);
@@ -485,38 +579,78 @@ public sealed class MainForm : Form
             RefreshCardSlots();
         }));
 
-        AddHeader(t, "BEHAVIOR");
-        t.Controls.Add(MakeRowLabel("Fallback card on disconnect", 34));
-        _fallbackCombo = new DarkCombo { Size = new Size(140, 24), Anchor = AnchorStyles.Right };
+        AddHeader(t, "BEHAVIOR & AUDIO CUES");
+        t.Controls.Add(MakeRowLabel("Fallback on disconnect", 34));
+        _fallbackCombo = new DarkCombo { Size = new Size(146, 24), Anchor = AnchorStyles.Right };
         _fallbackCombo.SelectedIndexChanged += (_, _) =>
         {
-            if (_updatingFallbackCombo) return;
-            _config.FallbackCardId = (_fallbackCombo.SelectedItem as CardChoice)?.Id;
+            if (_updatingFallbackCombo || _fallbackCombo.SelectedItem is not FallbackChoice choice) return;
+            _config.FallbackMode = choice.Mode;
+            _config.FallbackCardId = choice.Mode == FallbackMode.SpecificCard ? choice.CardId : null;
             Save();
+            RefreshCardStates();
         };
         t.Controls.Add(_fallbackCombo);
 
-        t.Controls.Add(MakeRowLabel("Play confirmation chime on switch"));
+        t.Controls.Add(MakeRowLabel("Play chime on profile / device switch", 32));
         t.Controls.Add(NewToggle(_config.ChimeEnabled, on => { _config.ChimeEnabled = on; Save(); }));
-        t.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)"));
+
+        t.Controls.Add(MakeRowLabel("Play chime on mic mute / unmute", 32));
+        t.Controls.Add(NewToggle(_config.MuteChimeEnabled, on => { _config.MuteChimeEnabled = on; Save(); }));
+
+        AddHeader(t, "MIC MUTE OVERLAY");
+        t.Controls.Add(MakeRowLabel("Show persistent MIC MUTED banner", 32));
+        t.Controls.Add(NewToggle(_config.MuteBannerEnabled, on =>
+        {
+            _config.MuteBannerEnabled = on;
+            Save();
+            ApplyMuteUi(_micMuted);
+        }));
+
+        t.Controls.Add(MakeRowLabel("Mute banner position", 34));
+        _muteBannerPosCombo = new DarkCombo { Size = new Size(146, 24), Anchor = AnchorStyles.Right };
+        _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopCenter, "Top center"));
+        _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopRight, "Top right"));
+        _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.BottomRight, "Bottom right"));
+        _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.ActiveScreenTop, "Active monitor top"));
+        _muteBannerPosCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (_updatingBannerPosCombo || _muteBannerPosCombo.SelectedItem is not BannerPosChoice pos) return;
+            _config.MuteBannerPosition = pos.Position;
+            Save();
+            ApplyMuteUi(_micMuted);
+        };
+        t.Controls.Add(_muteBannerPosCombo);
+
+        AddHeader(t, "SYSTEM");
+        t.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
         t.Controls.Add(NewToggle(IsStartupEnabled(), SetStartupSafe));
 
-        var filterBtn = new Button
-        {
-            Text = "Choose devices for cycling…",
-            Font = Theme.Body,
-            ForeColor = Theme.TextPrimary,
-            BackColor = Theme.BgMain,
-            FlatStyle = FlatStyle.Flat,
-            Dock = DockStyle.Fill,
-            Height = 30,
-            Margin = new Padding(0, 12, 0, 0),
-            Cursor = Cursors.Hand
-        };
-        filterBtn.FlatAppearance.BorderColor = Theme.BgBorder;
-        filterBtn.Click += (_, _) => _ = OpenDeviceFilterDialogAsync();
+        var filterBtn = MakeActionButton("Choose devices for cycling…", (_, _) => _ = OpenDeviceFilterDialogAsync());
+        filterBtn.Margin = new Padding(0, 10, 0, 0);
         t.Controls.Add(filterBtn);
         t.SetColumnSpan(filterBtn, 2);
+
+        var dataRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Height = 36,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 6, 0, 0),
+            BackColor = Theme.BgCard
+        };
+        dataRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        dataRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+        var openFolderBtn = MakeActionButton("Open Data Folder", (_, _) => OpenPathInShell(AppLog.DataDir, isDirectory: true));
+        openFolderBtn.Margin = new Padding(0, 0, 4, 0);
+        var openLogBtn = MakeActionButton("Open Log File", (_, _) => OpenPathInShell(AppLog.FilePath, isDirectory: false));
+        openLogBtn.Margin = new Padding(4, 0, 0, 0);
+        dataRow.Controls.Add(openFolderBtn, 0, 0);
+        dataRow.Controls.Add(openLogBtn, 1, 0);
+        t.Controls.Add(dataRow);
+        t.SetColumnSpan(dataRow, 2);
 
         var pathLbl = new Label
         {
@@ -525,8 +659,8 @@ public sealed class MainForm : Form
             ForeColor = Theme.TextMuted,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 56,
-            Margin = new Padding(0, 12, 0, 0)
+            Height = 52,
+            Margin = new Padding(0, 8, 0, 0)
         };
         t.Controls.Add(pathLbl);
         t.SetColumnSpan(pathLbl, 2);
@@ -534,7 +668,61 @@ public sealed class MainForm : Form
         panel.Controls.Add(t);
         UpdateHotKeyButtons();
         RefreshFallbackCombo();
+        RefreshMuteBannerPosCombo();
         return panel;
+    }
+
+    private static Button MakeActionButton(string text, EventHandler onClick)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Font = Theme.Body,
+            ForeColor = Theme.TextPrimary,
+            BackColor = Theme.BgMain,
+            FlatStyle = FlatStyle.Flat,
+            Dock = DockStyle.Fill,
+            Height = 30,
+            Cursor = Cursors.Hand
+        };
+        b.FlatAppearance.BorderColor = Theme.BgBorder;
+        b.Click += onClick;
+        return b;
+    }
+
+    private void OpenPathInShell(string path, bool isDirectory)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppLog.DataDir);
+            if (!isDirectory && !File.Exists(path))
+            {
+                File.WriteAllText(path, "");
+            }
+            Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"Failed to open '{path}'", ex);
+            SetStatus("Couldn't open path: " + ex.Message, true);
+        }
+    }
+
+    private void RefreshMuteBannerPosCombo()
+    {
+        if (_muteBannerPosCombo == null) return;
+        _updatingBannerPosCombo = true;
+        try
+        {
+            int idx = _muteBannerPosCombo.Items.Cast<BannerPosChoice>()
+                .ToList()
+                .FindIndex(c => c.Position == _config.MuteBannerPosition);
+            _muteBannerPosCombo.SelectedIndex = idx >= 0 ? idx : 0;
+        }
+        finally
+        {
+            _updatingBannerPosCombo = false;
+        }
     }
 
     private void RefreshFallbackCombo()
@@ -544,14 +732,19 @@ public sealed class MainForm : Form
         try
         {
             _fallbackCombo.Items.Clear();
-            _fallbackCombo.Items.Add(new CardChoice(null, "(None)"));
+            _fallbackCombo.Items.Add(new FallbackChoice(FallbackMode.None, null, "(None)"));
+            _fallbackCombo.Items.Add(new FallbackChoice(FallbackMode.PreviousCard, null, "(Previous card)"));
             foreach (var c in _config.Cards)
-                _fallbackCombo.Items.Add(new CardChoice(c.Id, c.Name));
+                _fallbackCombo.Items.Add(new FallbackChoice(FallbackMode.SpecificCard, c.Id, c.Name));
 
-            int idx = _config.FallbackCardId.HasValue
-                ? _config.Cards.FindIndex(c => c.Id == _config.FallbackCardId.Value) + 1
-                : 0;
-            _fallbackCombo.SelectedIndex = idx >= 0 && idx < _fallbackCombo.Items.Count ? idx : 0;
+            int idx = _config.FallbackMode switch
+            {
+                FallbackMode.PreviousCard => 1,
+                FallbackMode.SpecificCard when _config.FallbackCardId.HasValue =>
+                    _config.Cards.FindIndex(c => c.Id == _config.FallbackCardId.Value) is int ci && ci >= 0 ? ci + 2 : 0,
+                _ => 0
+            };
+            _fallbackCombo.SelectedIndex = idx;
         }
         finally
         {
@@ -595,7 +788,7 @@ public sealed class MainForm : Form
             ForeColor = Theme.TextPrimary,
             BackColor = Theme.BgMain,
             FlatStyle = FlatStyle.Flat,
-            Size = new Size(140, 26),
+            Size = new Size(146, 26),
             Anchor = AnchorStyles.Right,
             Cursor = Cursors.Hand
         };
@@ -616,7 +809,7 @@ public sealed class MainForm : Form
     }
 
     // =========================================================================================
-    // Views
+    // Views & diffed CardControl rendering
     // =========================================================================================
 
     private void ToggleSettings()
@@ -641,24 +834,35 @@ public sealed class MainForm : Form
     private void RenderCards()
     {
         _cardsPanel.SuspendLayout();
-        var old = _cardsPanel.Controls.Cast<Control>().ToList();
-        _cardsPanel.Controls.Clear();
-        foreach (var c in old) c.Dispose();
+
+        var existingById = _cardsPanel.Controls.OfType<CardControl>()
+            .ToDictionary(cc => cc.Card.Id);
 
         for (int i = 0; i < _config.Cards.Count; i++)
         {
-            var cc = new CardControl(_config.Cards[i]) { SlotText = SlotFor(i) };
-            cc.ActivateRequested += card => _ = ActivateCardAsync(card);
-            cc.EditRequested += card => _ = OpenCardEditorAsync(card, false);
-            cc.DeleteRequested += card =>
+            var card = _config.Cards[i];
+            if (existingById.Remove(card.Id, out var cc))
             {
-                _config.Cards.Remove(card);
-                if (_config.ActiveCardId == card.Id) _config.ActiveCardId = null;
-                if (_config.FallbackCardId == card.Id) _config.FallbackCardId = null;
-                Save();
-                QueueRender();
-            };
-            _cardsPanel.Controls.Add(cc);
+                cc.BindCard(card);
+                cc.SlotText = SlotFor(i);
+            }
+            else
+            {
+                cc = CreateCardControl(card, SlotFor(i));
+                _cardsPanel.Controls.Add(cc);
+            }
+
+            if (_cardsPanel.Controls.GetChildIndex(cc, false) != i)
+            {
+                _cardsPanel.Controls.SetChildIndex(cc, i);
+            }
+        }
+
+        // Remove and dispose only controls whose cards were deleted.
+        foreach (var stale in existingById.Values)
+        {
+            _cardsPanel.Controls.Remove(stale);
+            stale.Dispose();
         }
 
         ResizeCards();
@@ -667,6 +871,59 @@ public sealed class MainForm : Form
         _cardsPanel.ResumeLayout(true);
         UpdateViews();
         RegisterAllHotKeys();
+    }
+
+    private CardControl CreateCardControl(AudioCard card, string? slot)
+    {
+        var cc = new CardControl(card) { SlotText = slot };
+        cc.ActivateRequested += c => _ = ActivateCardAsync(c);
+        cc.EditRequested += c => _ = OpenCardEditorAsync(c, false);
+        cc.DuplicateRequested += DuplicateCard;
+        cc.SetFallbackRequested += ToggleCardAsFallback;
+        cc.DeleteRequested += DeleteCard;
+        return cc;
+    }
+
+    private void DuplicateCard(AudioCard card)
+    {
+        int idx = _config.Cards.IndexOf(card);
+        var copy = card.CloneAsDuplicate();
+        if (idx >= 0 && idx + 1 <= _config.Cards.Count)
+            _config.Cards.Insert(idx + 1, copy);
+        else
+            _config.Cards.Add(copy);
+
+        Save();
+        RenderCards();
+        SetStatus($"Duplicated '{card.Name}'", false);
+    }
+
+    private void ToggleCardAsFallback(AudioCard card)
+    {
+        if (_config.FallbackMode == FallbackMode.SpecificCard && _config.FallbackCardId == card.Id)
+        {
+            _config.FallbackMode = FallbackMode.None;
+            _config.FallbackCardId = null;
+            SetStatus($"Cleared '{card.Name}' as fallback", false);
+        }
+        else
+        {
+            _config.FallbackMode = FallbackMode.SpecificCard;
+            _config.FallbackCardId = card.Id;
+            SetStatus($"Fallback set to '{card.Name}'", false);
+        }
+
+        Save();
+        RefreshFallbackCombo();
+        RefreshCardStates();
+    }
+
+    private void DeleteCard(AudioCard card)
+    {
+        _config.Cards.Remove(card);
+        ProfileLogic.HandleCardDeleted(_config, card.Id);
+        Save();
+        QueueRender();
     }
 
     private void QueueRender()
@@ -678,12 +935,13 @@ public sealed class MainForm : Form
     private void ResizeCards()
     {
         float k = _cardsPanel.DeviceDpi / 96f;
-        int width = Math.Max((int)(220 * k), _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Horizontal);
+        int width = Math.Max((int)Math.Round(220 * k), _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Horizontal);
+        int marginBottom = (int)Math.Round(8 * k);
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
         {
             cc.Scale = k;
-            cc.Margin = new Padding(0, 0, 0, (int)(8 * k));
-            cc.Size = new Size(width, (int)(78 * k));
+            cc.Margin = new Padding(0, 0, 0, marginBottom);
+            cc.Size = new Size(width, cc.PreferredHeight(k));
         }
     }
 
@@ -700,15 +958,22 @@ public sealed class MainForm : Form
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
         {
             var c = cc.Card;
-            cc.IsActive = snap != null && CardIsActive(c, snap);
+            cc.IsActive = snap != null && ProfileLogic.CardIsActive(c, snap);
+            cc.IsFallback = _config.FallbackMode == FallbackMode.SpecificCard && _config.FallbackCardId == c.Id;
             cc.OutMissing = snap != null && c.OutputId.HasValue && !snap.OutputIds.Contains(c.OutputId.Value);
+            cc.CommMissing = snap != null && c.CommOutputId.HasValue && !snap.OutputIds.Contains(c.CommOutputId.Value);
             cc.InMissing = snap != null && c.InputId.HasValue && !snap.InputIds.Contains(c.InputId.Value);
         }
     }
 
     private void UpdateNow()
     {
-        _nowOut.Text = _snap?.OutName ?? "No output device";
+        string outText = _snap?.OutName ?? "No output device";
+        if (_snap?.DefaultCommOut is Guid commId && commId != _snap.DefaultOut && !string.IsNullOrEmpty(_snap.CommOutName))
+        {
+            outText += $"  (Comm: {ProfileLogic.ExtractShortDeviceName(_snap.CommOutName) ?? _snap.CommOutName})";
+        }
+        _nowOut.Text = outText;
         _nowIn.Text = (_snap?.InName ?? "No input device") + (_micMuted ? "   ● MUTED" : "");
         _nowIn.ForeColor = _micMuted ? Theme.Danger : Theme.TextPrimary;
         UpdateTrayTooltip();
@@ -717,7 +982,7 @@ public sealed class MainForm : Form
     private void UpdateTrayTooltip()
     {
         var lines = new List<string>();
-        var activeCard = _snap != null ? _config.Cards.FirstOrDefault(c => CardIsActive(c, _snap)) : null;
+        var activeCard = _snap != null ? _config.Cards.FirstOrDefault(c => ProfileLogic.CardIsActive(c, _snap)) : null;
         lines.Add(activeCard != null ? $"Card: {Shorten(activeCard.Name, 30)}" : "AudioSwitcher");
 
         if (!string.IsNullOrEmpty(_snap?.OutName))
@@ -754,19 +1019,25 @@ public sealed class MainForm : Form
         var cards = _cardsPanel.Controls.OfType<CardControl>().ToList();
         if (cards.Count == 0) return;
 
-        int gap = _cardsPanel.DeviceDpi / 96 * 4;
-        _dropIndex = cards.Count;
-        _dropLineY = cards[^1].Bottom + gap;
+        int gap = (int)Math.Round(_cardsPanel.DeviceDpi / 96f * 4f);
+        int newDropIndex = cards.Count;
+        int newDropLineY = cards[^1].Bottom + gap;
         for (int i = 0; i < cards.Count; i++)
         {
             if (pt.Y < cards[i].Top + cards[i].Height / 2)
             {
-                _dropIndex = i;
-                _dropLineY = cards[i].Top - gap;
+                newDropIndex = i;
+                newDropLineY = cards[i].Top - gap;
                 break;
             }
         }
-        _cardsPanel.Invalidate();
+
+        if (newDropIndex != _dropIndex || newDropLineY != _dropLineY)
+        {
+            _dropIndex = newDropIndex;
+            _dropLineY = newDropLineY;
+            _cardsPanel.Invalidate();
+        }
     }
 
     private void OnCardsDragDrop(object? sender, DragEventArgs e)
@@ -795,9 +1066,17 @@ public sealed class MainForm : Form
 
     private AudioCard NewCardFromCurrentDevices()
     {
-        var card = new AudioCard { Name = "New Card" };
         var snap = _snap;
+        var card = new AudioCard
+        {
+            Name = ProfileLogic.SuggestCardName(snap?.OutName, snap?.InName)
+        };
         if (snap?.DefaultOut is Guid o) { card.OutputId = o; card.OutputName = snap.OutName ?? "None"; }
+        if (snap?.DefaultCommOut is Guid co && co != snap.DefaultOut)
+        {
+            card.CommOutputId = co;
+            card.CommOutputName = snap.CommOutName ?? "None";
+        }
         if (snap?.DefaultIn is Guid i) { card.InputId = i; card.InputName = snap.InName ?? "None"; }
         return card;
     }
@@ -825,9 +1104,17 @@ public sealed class MainForm : Form
         var o = dlg.SelectedOutput;
         card.OutputId = o?.Id;
         card.OutputName = o?.Id == null ? "None" : o.Name;
+
+        var co = dlg.SelectedCommOutput;
+        card.CommOutputId = co?.Id;
+        card.CommOutputName = co?.Id == null ? "None" : co.Name;
+
         var i = dlg.SelectedInput;
         card.InputId = i?.Id;
         card.InputName = i?.Id == null ? "None" : i.Name;
+
+        card.OutputVolume = dlg.OutputVolume;
+        card.InputVolume = dlg.InputVolume;
         card.AutoActivate = dlg.AutoActivate;
 
         if (isNew) _config.Cards.Add(card);
@@ -851,17 +1138,17 @@ public sealed class MainForm : Form
 
         if (IsDisposed) return;
 
-        using var dlg = new DeviceFilterDialog(outputs, inputs, _config.CycleOutputIds, _config.CycleInputIds);
+        using var dlg = new DeviceFilterDialog(outputs, inputs, _config.CycleOutputs, _config.CycleInputs);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-        _config.CycleOutputIds = dlg.OutputIds;
-        _config.CycleInputIds = dlg.InputIds;
+        _config.CycleOutputs = dlg.SelectedOutputs;
+        _config.CycleInputs = dlg.SelectedInputs;
         Save();
         SetStatus("Cycle filter saved", false);
     }
 
     // =========================================================================================
-    // Hotkeys
+    // Hotkeys & Esc navigation
     // =========================================================================================
 
     private HotKeyBinding GetBinding(HotKeyTarget t) => t switch
@@ -891,7 +1178,7 @@ public sealed class MainForm : Form
         _ => "Toggle Mic Mute"
     };
 
-    private bool RegisterAllHotKeys()
+    private bool RegisterAllHotKeys(bool force = false)
     {
         if (_capturing != null) return true;
 
@@ -915,7 +1202,7 @@ public sealed class MainForm : Form
             }
         }
 
-        var failed = _hotKeys.RegisterAll(items);
+        var failed = _hotKeys.RegisterAll(items, force);
         if (failed.Count == 0) return true;
 
         var msg = "Hotkey already used by another app: " + string.Join(", ", failed.Take(2)) +
@@ -950,7 +1237,7 @@ public sealed class MainForm : Form
     {
         _capturing = null;
         UpdateHotKeyButtons();
-        return RegisterAllHotKeys();
+        return RegisterAllHotKeys(force: true);
     }
 
     private void CancelCapture()
@@ -963,7 +1250,15 @@ public sealed class MainForm : Form
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         if (_capturing is not HotKeyTarget target)
+        {
+            if (keyData == Keys.Escape)
+            {
+                if (_settingsOpen) ToggleSettings();
+                else HideToTray();
+                return true;
+            }
             return base.ProcessCmdKey(ref msg, keyData);
+        }
 
         var key = keyData & Keys.KeyCode;
         if (key is Keys.ControlKey or Keys.ShiftKey or Keys.Menu or Keys.LWin or Keys.RWin)
@@ -988,7 +1283,7 @@ public sealed class MainForm : Form
         }
 
         var binding = new HotKeyBinding { Modifiers = mods, Key = key };
-        var clash = FindConflict(target, binding);
+        var clash = ProfileLogic.FindHotKeyConflict(_config, target, binding);
         if (clash != null)
         {
             SetStatus($"{binding.Format()} is already used for \"{clash}\"", true);
@@ -1001,66 +1296,46 @@ public sealed class MainForm : Form
         return true;
     }
 
-    private string? FindConflict(HotKeyTarget target, HotKeyBinding candidate)
-    {
-        foreach (var other in Enum.GetValues<HotKeyTarget>())
-            if (other != target && GetBinding(other).SameAs(candidate)) return TargetName(other);
-
-        if (_config.JumpHotKeysEnabled)
-        {
-            static bool IsJump(HotKeyBinding b, HotKeyModifiers mods) =>
-                b.Modifiers == mods && b.Key >= Keys.D1 && b.Key <= Keys.D9;
-
-            if (target != HotKeyTarget.Card && IsJump(candidate, _config.CardHotKey.Modifiers))
-                return "Jump to card";
-
-            if (target == HotKeyTarget.Card)
-                foreach (var other in Enum.GetValues<HotKeyTarget>())
-                    if (other != target && IsJump(GetBinding(other), candidate.Modifiers)) return TargetName(other);
-        }
-        return null;
-    }
-
     // =========================================================================================
-    // Audio actions (off UI thread)
+    // Audio actions (off UI thread, directly consuming returned AudioSnapshot)
     // =========================================================================================
-
-    private static bool CardIsActive(AudioCard c, AudioSnapshot s) =>
-        (c.OutputId.HasValue || c.InputId.HasValue)
-        && (!c.OutputId.HasValue || c.OutputId == s.DefaultOut)
-        && (!c.InputId.HasValue || c.InputId == s.DefaultIn);
-
-    private bool CardIsAvailable(AudioCard c)
-    {
-        var s = _snap;
-        if (s == null) return true;
-        return (!c.OutputId.HasValue || s.OutputIds.Contains(c.OutputId.Value))
-            && (!c.InputId.HasValue || s.InputIds.Contains(c.InputId.Value));
-    }
 
     private async Task ActivateCardAsync(AudioCard card, string? categoryOverride = null)
     {
         ApplyResult result;
         try
         {
-            result = await _audio.ApplyAsync(card.OutputId, card.OutputName, card.InputId, card.InputName);
+            result = await _audio.ApplyAsync(
+                card.OutputId,
+                card.OutputName,
+                card.InputId,
+                card.InputName,
+                card.CommOutputId,
+                card.CommOutputName,
+                card.OutputVolume,
+                card.InputVolume);
         }
         catch (Exception ex)
         {
             AppLog.Error($"Failed to activate card '{card.Name}'", ex);
-            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, playSwitchChime: false);
             return;
         }
 
         if (IsDisposed) return;
 
-        // Auto-relink GUIDs if matched by name fallback
         bool relinked = false;
         if (result.ResolvedOutputId.HasValue)
         {
             card.OutputId = result.ResolvedOutputId.Value;
             relinked = true;
             AppLog.Info($"Re-linked output for card '{card.Name}' by name to {card.OutputId}.");
+        }
+        if (result.ResolvedCommOutputId.HasValue)
+        {
+            card.CommOutputId = result.ResolvedCommOutputId.Value;
+            relinked = true;
+            AppLog.Info($"Re-linked comm output for card '{card.Name}' by name to {card.CommOutputId}.");
         }
         if (result.ResolvedInputId.HasValue)
         {
@@ -1072,21 +1347,22 @@ public sealed class MainForm : Form
         if (!result.AnyApplied)
         {
             AppLog.Warn($"Card '{card.Name}' unavailable: {result.Problem}");
-            ShowFeedback("CARD UNAVAILABLE", $"{card.Name}: {result.Problem ?? "nothing to apply"}", Theme.Warning, false);
+            ShowFeedback("CARD UNAVAILABLE", $"{card.Name}: {result.Problem ?? "nothing to apply"}", Theme.Warning, playSwitchChime: false);
             return;
         }
 
-        _config.ActiveCardId = card.Id;
+        ProfileLogic.RecordCardSwitch(_config, card, _snap);
         Save();
-        if (relinked) RefreshCardStates();
-        await ForceRefreshAsync();
 
-        if (IsDisposed) return;
+        if (result.Snapshot != null)
+            ApplySnapshot(result.Snapshot, allowAutoEvents: false, force: true);
+        else if (relinked)
+            RefreshCardStates();
 
         if (result.Problem != null)
-            ShowFeedback("CARD PARTLY ACTIVE", $"{card.Name}: {result.Problem}", Theme.Warning, false);
+            ShowFeedback("CARD PARTLY ACTIVE", $"{card.Name}: {result.Problem}", Theme.Warning, playSwitchChime: false);
         else
-            ShowFeedback(categoryOverride ?? "CARD ACTIVE", card.Name, Theme.Accent, true);
+            ShowFeedback(categoryOverride ?? "CARD ACTIVE", card.Name, Theme.Accent, playSwitchChime: true);
 
         AppLog.Info($"Activated card '{card.Name}' ({categoryOverride ?? "manual"}).");
     }
@@ -1096,45 +1372,41 @@ public sealed class MainForm : Form
 
     private async Task CycleCardAsync()
     {
-        var cards = _config.Cards;
-        if (cards.Count == 0)
+        if (_config.Cards.Count == 0)
         {
-            ShowFeedback("CARDS", "No cards yet", Theme.Warning, false);
+            ShowFeedback("CARDS", "No cards yet", Theme.Warning, playSwitchChime: false);
             return;
         }
 
-        int start = _snap != null ? cards.FindIndex(c => CardIsActive(c, _snap)) : -1;
-        if (start < 0) start = cards.FindIndex(c => c.Id == _config.ActiveCardId);
-
-        for (int step = 1; step <= cards.Count; step++)
+        var next = ProfileLogic.FindNextAvailableCard(_config.Cards, _snap, _config.ActiveCardId);
+        if (next == null)
         {
-            var next = cards[(start + step) % cards.Count];
-            if (!CardIsAvailable(next)) continue;
-            await ActivateCardAsync(next);
+            ShowFeedback("CARDS", "No card has all its devices connected", Theme.Warning, playSwitchChime: false);
             return;
         }
-        ShowFeedback("CARDS", "No card has all its devices connected", Theme.Warning, false);
+
+        await ActivateCardAsync(next);
     }
 
     private async Task CycleOutputAsync()
     {
         try
         {
-            var next = await _audio.CycleOutputAsync(_config.CycleOutputIds);
+            var res = await _audio.CycleOutputAsync(_config.CycleOutputs);
             if (IsDisposed) return;
-            if (next == null)
+            if (res.Device == null)
             {
-                ShowFeedback("OUTPUT", "Fewer than two devices to cycle through", Theme.Warning, false);
+                ShowFeedback("OUTPUT", "Fewer than two devices to cycle through", Theme.Warning, playSwitchChime: false);
                 return;
             }
-            await ForceRefreshAsync();
-            ShowFeedback("OUTPUT", next.Name, Theme.Accent, true);
-            AppLog.Info($"Cycled output to '{next.Name}'.");
+            if (res.Snapshot != null) ApplySnapshot(res.Snapshot, allowAutoEvents: false, force: true);
+            ShowFeedback("OUTPUT", res.Device.Name, Theme.Accent, playSwitchChime: true);
+            AppLog.Info($"Cycled output to '{res.Device.Name}'.");
         }
         catch (Exception ex)
         {
             AppLog.Error("CycleOutput failed", ex);
-            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, playSwitchChime: false);
         }
     }
 
@@ -1142,135 +1414,140 @@ public sealed class MainForm : Form
     {
         try
         {
-            var next = await _audio.CycleInputAsync(_config.CycleInputIds);
+            var res = await _audio.CycleInputAsync(_config.CycleInputs);
             if (IsDisposed) return;
-            if (next == null)
+            if (res.Device == null)
             {
-                ShowFeedback("INPUT", "Fewer than two devices to cycle through", Theme.Warning, false);
+                ShowFeedback("INPUT", "Fewer than two devices to cycle through", Theme.Warning, playSwitchChime: false);
                 return;
             }
-            await ForceRefreshAsync();
-            ShowFeedback("INPUT", next.Name, Theme.Accent, true);
-            AppLog.Info($"Cycled input to '{next.Name}'.");
+            if (res.Snapshot != null) ApplySnapshot(res.Snapshot, allowAutoEvents: false, force: true);
+            ShowFeedback("INPUT", res.Device.Name, Theme.Accent, playSwitchChime: true);
+            AppLog.Info($"Cycled input to '{res.Device.Name}'.");
         }
         catch (Exception ex)
         {
             AppLog.Error("CycleInput failed", ex);
-            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, false);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, playSwitchChime: false);
+        }
+    }
+
+    private async Task SwitchSingleDeviceAsync(bool isOutput, Guid deviceId, string deviceName)
+    {
+        try
+        {
+            var res = isOutput
+                ? await _audio.ApplyAsync(deviceId, deviceName, null, null)
+                : await _audio.ApplyAsync(null, null, deviceId, deviceName);
+            if (IsDisposed) return;
+            if (!res.AnyApplied)
+            {
+                ShowFeedback(isOutput ? "OUTPUT" : "INPUT", res.Problem ?? "Device unavailable", Theme.Warning, playSwitchChime: false);
+                return;
+            }
+            if (res.Snapshot != null) ApplySnapshot(res.Snapshot, allowAutoEvents: false, force: true);
+            ShowFeedback(isOutput ? "OUTPUT" : "INPUT", deviceName, Theme.Accent, playSwitchChime: isOutput);
+            AppLog.Info($"Switched {(isOutput ? "output" : "input")} via tray menu to '{deviceName}'.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Tray quick device switch failed", ex);
+            if (!IsDisposed) ShowFeedback("SWITCH FAILED", ex.Message, Theme.Danger, playSwitchChime: false);
         }
     }
 
     private async Task ToggleMicMuteAsync()
     {
-        bool? muted;
+        MuteToggleResult res;
         try
         {
-            muted = await _audio.ToggleMuteAsync();
+            res = await _audio.ToggleMuteAsync();
         }
         catch (Exception ex)
         {
             AppLog.Error("ToggleMicMute failed", ex);
-            if (!IsDisposed) ShowFeedback("MICROPHONE", ex.Message, Theme.Danger, false);
+            if (!IsDisposed) ShowFeedback("MICROPHONE", ex.Message, Theme.Danger, playSwitchChime: false);
             return;
         }
 
         if (IsDisposed) return;
 
-        if (muted == null)
+        if (res.Muted == null)
         {
-            ShowFeedback("MICROPHONE", "No input device", Theme.Warning, false);
+            ShowFeedback("MICROPHONE", "No input device", Theme.Warning, playSwitchChime: false);
             return;
         }
 
-        await ForceRefreshAsync();
-        ApplyMuteUi(muted.Value);
-        ShowFeedback("MICROPHONE", muted.Value ? "Muted" : "Live (Unmuted)",
-            muted.Value ? Theme.Danger : Theme.Success, false);
-        AppLog.Info($"Mic mute toggled -> {(muted.Value ? "Muted" : "Live")}.");
+        bool muted = res.Muted.Value;
+        if (res.Snapshot != null)
+            ApplySnapshot(res.Snapshot, allowAutoEvents: false, force: true);
+        else
+            ApplyMuteUi(muted);
+
+        ShowFeedback("MICROPHONE", muted ? "Muted" : "Live (Unmuted)",
+            muted ? Theme.Danger : Theme.Success, playSwitchChime: false);
+
+        if (_config.MuteChimeEnabled)
+        {
+            ChimePlayer.Play(muted ? ChimeCue.Muted : ChimeCue.Unmuted, waitForDeviceRouting: false);
+        }
+
+        AppLog.Info($"Mic mute toggled -> {(muted ? "Muted" : "Live")}.");
     }
 
-    private void ShowFeedback(string category, string title, Color accent, bool playChime)
+    private void ShowFeedback(string category, string title, Color accent, bool playSwitchChime)
     {
         SetStatus($"{category}: {title}", accent == Theme.Warning || accent == Theme.Danger);
         _osd.ShowMessage(category, title, accent);
-        if (playChime && _config.ChimeEnabled) ChimePlayer.PlayAsync();
+        if (playSwitchChime && _config.ChimeEnabled)
+        {
+            ChimePlayer.Play(ChimeCue.Switch, waitForDeviceRouting: true);
+        }
     }
 
     // =========================================================================================
-    // Live state (polling), name re-linking, debounced auto-activate & fallback card
+    // Live state (single-flight coalesced), name re-linking, auto-activate & fallback modes
     // =========================================================================================
 
-    private Task ForceRefreshAsync()
-    {
-        _lastSignature = "";
-        return RefreshStateAsync(false, force: true);
-    }
+    private Task ForceRefreshAsync() => RefreshStateAsync(allowAutoEvents: false, force: true);
 
-    private async Task RefreshStateAsync(bool allowAutoEvents, bool force = false)
+    private Task RefreshStateAsync(bool allowAutoEvents, bool force = false) =>
+        _refreshCoalescer.RunAsync(allowAutoEvents, force);
+
+    private async Task ExecuteRefreshPassAsync(bool allowAutoEvents, bool force)
     {
-        if (_polling && !force) return;
-        _polling = true;
         try
         {
             var snap = await _audio.SnapshotAsync();
-            if (IsDisposed) return;
-
-            var signature = snap.Signature;
-            if (signature == _lastSignature) return;
-
-            var previous = _snap;
-            _snap = snap;
-            _lastSignature = signature;
-
-            RelinkCardsByName(snap);
-            ApplyMuteUi(snap.MicMuted);
-            RefreshCardStates();
-
-            if (allowAutoEvents && previous != null)
-            {
-                HandleDeviceChanges(previous, snap);
-            }
+            if (IsDisposed || snap == null) return;
+            ApplySnapshot(snap, allowAutoEvents, force);
         }
         catch (Exception ex)
         {
             AppLog.Error("Snapshot refresh failed", ex);
         }
-        finally
-        {
-            _polling = false;
-        }
     }
 
-    private void RelinkCardsByName(AudioSnapshot snap)
+    private void ApplySnapshot(AudioSnapshot snap, bool allowAutoEvents, bool force)
     {
-        bool changed = false;
-        foreach (var card in _config.Cards)
-        {
-            if (card.OutputId.HasValue && !snap.OutputIds.Contains(card.OutputId.Value) &&
-                !string.IsNullOrWhiteSpace(card.OutputName) && !card.OutputName.Equals("None", StringComparison.OrdinalIgnoreCase))
-            {
-                var match = snap.OutputNames.FirstOrDefault(kv => kv.Value.Equals(card.OutputName, StringComparison.OrdinalIgnoreCase));
-                if (match.Key != Guid.Empty)
-                {
-                    card.OutputId = match.Key;
-                    changed = true;
-                    AppLog.Info($"Auto-relinked card '{card.Name}' output by name to {match.Key}.");
-                }
-            }
+        if (!force && snap.EqualsState(_snap))
+            return;
 
-            if (card.InputId.HasValue && !snap.InputIds.Contains(card.InputId.Value) &&
-                !string.IsNullOrWhiteSpace(card.InputName) && !card.InputName.Equals("None", StringComparison.OrdinalIgnoreCase))
-            {
-                var match = snap.InputNames.FirstOrDefault(kv => kv.Value.Equals(card.InputName, StringComparison.OrdinalIgnoreCase));
-                if (match.Key != Guid.Empty)
-                {
-                    card.InputId = match.Key;
-                    changed = true;
-                    AppLog.Info($"Auto-relinked card '{card.Name}' input by name to {match.Key}.");
-                }
-            }
+        var previous = _snap;
+        _snap = snap;
+
+        if (ProfileLogic.RelinkByName(_config, snap, AppLog.Info))
+        {
+            Save();
         }
-        if (changed) Save();
+
+        ApplyMuteUi(snap.MicMuted);
+        RefreshCardStates();
+
+        if (allowAutoEvents && previous != null)
+        {
+            HandleDeviceChanges(previous, snap);
+        }
     }
 
     private void HandleDeviceChanges(AudioSnapshot previous, AudioSnapshot now)
@@ -1308,28 +1585,12 @@ public sealed class MainForm : Form
             }
         }
 
-        // 2. Fallback card if the active card's device disconnected
-        if (removedIds.Count > 0 && _config.FallbackCardId.HasValue)
+        // 2. Fallback card (None, PreviousCard, SpecificCard) if the active card's device disconnected
+        var fallback = ProfileLogic.ResolveFallbackCard(_config, previous, now, removedIds);
+        if (fallback != null)
         {
-            var activeCard = _config.Cards.FirstOrDefault(c => c.Id == _config.ActiveCardId)
-                ?? _config.Cards.FirstOrDefault(c => CardIsActive(c, previous));
-
-            if (activeCard != null && activeCard.Id != _config.FallbackCardId.Value)
-            {
-                bool lostDevice =
-                    (activeCard.OutputId.HasValue && removedIds.Contains(activeCard.OutputId.Value)) ||
-                    (activeCard.InputId.HasValue && removedIds.Contains(activeCard.InputId.Value));
-
-                if (lostDevice)
-                {
-                    var fallback = _config.Cards.FirstOrDefault(c => c.Id == _config.FallbackCardId.Value);
-                    if (fallback != null && CardIsAvailable(fallback) && !CardIsActive(fallback, now))
-                    {
-                        AppLog.Info($"Active card '{activeCard.Name}' lost a device; switching to fallback '{fallback.Name}'.");
-                        _ = ActivateCardAsync(fallback, "FALLBACK ACTIVE");
-                    }
-                }
-            }
+            AppLog.Info($"Active card lost a device; switching to fallback '{fallback.Name}' ({_config.FallbackMode}).");
+            _ = ActivateCardAsync(fallback, "FALLBACK ACTIVE");
         }
     }
 
@@ -1346,9 +1607,10 @@ public sealed class MainForm : Form
 
         foreach (var c in _config.Cards)
         {
-            if (!c.AutoActivate || !CardIsAvailable(c) || CardIsActive(c, _snap)) continue;
+            if (!c.AutoActivate || !ProfileLogic.CardIsAvailable(c, _snap) || ProfileLogic.CardIsActive(c, _snap)) continue;
             bool touchesNew =
                 (c.OutputId.HasValue && stillConnected.Contains(c.OutputId.Value)) ||
+                (c.CommOutputId.HasValue && stillConnected.Contains(c.CommOutputId.Value)) ||
                 (c.InputId.HasValue && stillConnected.Contains(c.InputId.Value));
             if (!touchesNew) continue;
 
@@ -1360,14 +1622,14 @@ public sealed class MainForm : Form
     private void ApplyMuteUi(bool muted)
     {
         _micMuted = muted;
-        if (muted) _muteBanner.ShowBanner();
+        if (muted && _config.MuteBannerEnabled) _muteBanner.ShowBanner(_config.MuteBannerPosition);
         else _muteBanner.Hide();
         _tray.Icon = muted ? TrayIcons.Muted : TrayIcons.Normal;
         UpdateNow();
     }
 
     // =========================================================================================
-    // Tray menu
+    // Tray menu (cards, quick output/input submenus, and shortcut hints)
     // =========================================================================================
 
     private void RebuildTrayMenu()
@@ -1384,22 +1646,88 @@ public sealed class MainForm : Form
         if (_config.Cards.Count > 0)
         {
             items.Add(new ToolStripSeparator());
-            foreach (var card in _config.Cards)
+            for (int i = 0; i < _config.Cards.Count; i++)
             {
-                var c = card;
+                var c = _config.Cards[i];
                 var mi = new ToolStripMenuItem(c.Name)
                 {
-                    Checked = _snap != null && CardIsActive(c, _snap),
-                    Enabled = CardIsAvailable(c)
+                    Checked = _snap != null && ProfileLogic.CardIsActive(c, _snap),
+                    Enabled = ProfileLogic.CardIsAvailable(c, _snap),
+                    ShortcutKeyDisplayString = SlotFor(i) is string slot
+                        ? $"{_config.CardHotKey.FormatModifiers()} + {slot}"
+                        : ""
                 };
                 mi.Click += (_, _) => _ = ActivateCardAsync(c);
                 items.Add(mi);
             }
+
+            var cycleCardsItem = new ToolStripMenuItem("Cycle Cards")
+            {
+                ShortcutKeyDisplayString = _config.CardHotKey.Format()
+            };
+            cycleCardsItem.Click += (_, _) => _ = CycleCardAsync();
+            items.Add(cycleCardsItem);
         }
 
         items.Add(new ToolStripSeparator());
-        items.Add("Toggle Mic Mute", null, (_, _) => _ = ToggleMicMuteAsync());
+        items.Add(BuildDeviceSubMenu("Output Device", isOutput: true));
+        items.Add(BuildDeviceSubMenu("Input Device", isOutput: false));
+
+        items.Add(new ToolStripSeparator());
+        var muteItem = new ToolStripMenuItem("Toggle Mic Mute")
+        {
+            Checked = _micMuted,
+            ShortcutKeyDisplayString = _config.MuteHotKey.Format()
+        };
+        muteItem.Click += (_, _) => _ = ToggleMicMuteAsync();
+        items.Add(muteItem);
+
         items.Add("Exit", null, (_, _) => { _allowClose = true; Close(); });
+    }
+
+    private ToolStripMenuItem BuildDeviceSubMenu(string label, bool isOutput)
+    {
+        var root = new ToolStripMenuItem(label);
+        root.DropDown.Renderer = new DarkMenuRenderer();
+        root.DropDown.BackColor = Theme.BgCard;
+        root.DropDown.ForeColor = Theme.TextPrimary;
+        root.DropDown.Font = Theme.Body;
+
+        var names = isOutput ? _snap?.OutputNames : _snap?.InputNames;
+        var currentDefault = isOutput ? _snap?.DefaultOut : _snap?.DefaultIn;
+
+        if (names is { Count: > 0 })
+        {
+            foreach (var kv in names.OrderBy(kv => kv.Value, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var id = kv.Key;
+                var devName = kv.Value;
+                var item = new ToolStripMenuItem(devName)
+                {
+                    Checked = currentDefault == id
+                };
+                item.Click += (_, _) => _ = SwitchSingleDeviceAsync(isOutput, id, devName);
+                root.DropDownItems.Add(item);
+            }
+
+            root.DropDownItems.Add(new ToolStripSeparator());
+            var cycleItem = new ToolStripMenuItem(isOutput ? "Cycle Output" : "Cycle Input")
+            {
+                ShortcutKeyDisplayString = (isOutput ? _config.OutputHotKey : _config.InputHotKey).Format()
+            };
+            cycleItem.Click += (_, _) =>
+            {
+                if (isOutput) _ = CycleOutputAsync();
+                else _ = CycleInputAsync();
+            };
+            root.DropDownItems.Add(cycleItem);
+        }
+        else
+        {
+            root.DropDownItems.Add(new ToolStripMenuItem("No devices connected") { Enabled = false });
+        }
+
+        return root;
     }
 
     // =========================================================================================

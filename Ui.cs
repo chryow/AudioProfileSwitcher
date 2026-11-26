@@ -16,7 +16,7 @@ internal static class Theme
     public static readonly Color TextSoft = Color.FromArgb(190, 196, 208);
     public static readonly Color TextMuted = Color.FromArgb(148, 155, 168);
 
-    // Cached fonts: created once, shared by every control (no per-render GDI leaks).
+    // Cached fonts: created once, shared by standard DPI-autoscaled controls.
     public static readonly Font Body = new("Segoe UI", 8.5f);
     public static readonly Font BodyBold = new("Segoe UI", 8.5f, FontStyle.Bold);
     public static readonly Font Title = new("Segoe UI", 10f, FontStyle.Bold);
@@ -45,7 +45,7 @@ internal static class Gfx
     }
 }
 
-/// <summary>Dark renderer for the system tray ContextMenuStrip.</summary>
+/// <summary>Dark renderer for system tray and card ContextMenuStrips.</summary>
 internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 {
     public DarkMenuRenderer() : base(new DarkColorTable()) { }
@@ -77,8 +77,17 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
-        e.TextColor = e.Item.Enabled ? Theme.TextPrimary : Theme.TextMuted;
+        bool isShortcut = e.Item is ToolStripMenuItem mi &&
+                          !string.IsNullOrEmpty(mi.ShortcutKeyDisplayString) &&
+                          string.Equals(e.Text, mi.ShortcutKeyDisplayString, StringComparison.Ordinal);
+        e.TextColor = !e.Item.Enabled ? Theme.TextMuted : (isShortcut ? Theme.TextMuted : Theme.TextPrimary);
         base.OnRenderItemText(e);
+    }
+
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+    {
+        e.ArrowColor = e.Item?.Enabled == true ? Theme.TextSoft : Theme.TextMuted;
+        base.OnRenderArrow(e);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
@@ -110,11 +119,31 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
     }
 }
 
-/// <summary>Tray icons drawn at startup (speaker glyph; red dot when the mic is muted).</summary>
+/// <summary>Tray &amp; window icons drawn/loaded at startup.</summary>
 internal static class TrayIcons
 {
     public static readonly Icon Normal = Create(false);
     public static readonly Icon Muted = Create(true);
+    public static readonly Icon AppWindow = LoadProcessIcon() ?? Normal;
+
+    private static Icon? LoadProcessIcon()
+    {
+        try
+        {
+            using var stream = typeof(TrayIcons).Assembly.GetManifestResourceStream("AudioProfileSwitcher.app.ico");
+            if (stream != null) return new Icon(stream);
+        }
+        catch { }
+
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
+                return Icon.ExtractAssociatedIcon(exe);
+        }
+        catch { }
+        return null;
+    }
 
     private static Icon Create(bool muted)
     {
@@ -144,7 +173,7 @@ internal static class TrayIcons
                 g.DrawEllipse(ring, 18, 18, 13, 13);
             }
         }
-        // Two static icons for the whole process lifetime: the handles are intentionally kept.
+        // Static icons for the whole process lifetime: handles are intentionally kept.
         return Icon.FromHandle(bmp.GetHicon());
     }
 }
@@ -214,6 +243,160 @@ internal sealed class ToggleSwitch : Control
     }
 }
 
+/// <summary>Custom dark horizontal 0..100% slider with mouse drag, wheel, and keyboard support.</summary>
+internal sealed class DarkSlider : Control
+{
+    private int _min;
+    private int _max = 100;
+    private int _value = 80;
+    private bool _dragging;
+    private bool _hover;
+
+    public event EventHandler? ValueChanged;
+
+    public DarkSlider()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.Selectable, true);
+        Cursor = Cursors.Hand;
+        Size = new Size(180, 22);
+        TabStop = true;
+    }
+
+    public int Minimum
+    {
+        get => _min;
+        set { _min = value; if (_value < _min) Value = _min; Invalidate(); }
+    }
+
+    public int Maximum
+    {
+        get => _max;
+        set { _max = Math.Max(_min + 1, value); if (_value > _max) Value = _max; Invalidate(); }
+    }
+
+    public int Value
+    {
+        get => _value;
+        set
+        {
+            int clamped = Math.Clamp(value, _min, _max);
+            if (_value == clamped) return;
+            _value = clamped;
+            Invalidate();
+            ValueChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private int ThumbRadius => Math.Max(5, Height / 3);
+
+    private void SetFromX(int x)
+    {
+        int pad = ThumbRadius + 2;
+        int usable = Math.Max(1, Width - pad * 2);
+        double ratio = Math.Clamp((x - pad) / (double)usable, 0.0, 1.0);
+        Value = _min + (int)Math.Round(ratio * (_max - _min));
+    }
+
+    protected override bool IsInputKey(Keys keyData) =>
+        keyData is Keys.Left or Keys.Right or Keys.Home or Keys.End || base.IsInputKey(keyData);
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (!Enabled || e.Button != MouseButtons.Left) return;
+        Focus();
+        _dragging = true;
+        Capture = true;
+        SetFromX(e.X);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (_dragging && Enabled) SetFromX(e.X);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button == MouseButtons.Left && _dragging)
+        {
+            _dragging = false;
+            Capture = false;
+            Invalidate();
+        }
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (!Enabled) return;
+        Value += e.Delta > 0 ? 2 : -2;
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (!Enabled) return;
+        switch (e.KeyCode)
+        {
+            case Keys.Left: Value -= 1; e.Handled = true; break;
+            case Keys.Right: Value += 1; e.Handled = true; break;
+            case Keys.PageDown: Value -= 10; e.Handled = true; break;
+            case Keys.PageUp: Value += 10; e.Handled = true; break;
+            case Keys.Home: Value = _min; e.Handled = true; break;
+            case Keys.End: Value = _max; e.Handled = true; break;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+
+        int r = ThumbRadius;
+        int pad = r + 2;
+        int trackH = Math.Max(4, Height / 5);
+        int trackY = (Height - trackH) / 2;
+        int usable = Math.Max(1, Width - pad * 2);
+        double ratio = (_value - _min) / (double)Math.Max(1, _max - _min);
+        int thumbX = pad + (int)Math.Round(ratio * usable);
+
+        var bgTrack = new Rectangle(pad, trackY, usable, trackH);
+        using (var path = Gfx.RoundRect(bgTrack, trackH / 2))
+        using (var b = new SolidBrush(Theme.BgBorder))
+            g.FillPath(b, path);
+
+        int fillW = thumbX - pad;
+        if (fillW > 1)
+        {
+            var fgTrack = new Rectangle(pad, trackY, fillW, trackH);
+            using var path = Gfx.RoundRect(fgTrack, trackH / 2);
+            using var b = new SolidBrush(Enabled ? Theme.Accent : Theme.TextMuted);
+            g.FillPath(b, path);
+        }
+
+        var knobRect = new Rectangle(thumbX - r, Height / 2 - r, r * 2, r * 2);
+        using (var knob = new SolidBrush(Enabled ? Color.White : Theme.TextMuted))
+            g.FillEllipse(knob, knobRect);
+
+        if (Enabled && (_hover || _dragging || (Focused && ShowFocusCues)))
+        {
+            using var ring = new Pen(Theme.Accent, 1.5f);
+            g.DrawEllipse(ring, knobRect);
+        }
+    }
+}
+
 /// <summary>Owner-drawn combo so the drop-down actually follows the dark theme.</summary>
 internal sealed class DarkCombo : ComboBox
 {
@@ -242,8 +425,8 @@ internal sealed class DarkCombo : ComboBox
 }
 
 /// <summary>
-/// One audio card: custom painted, with hover/focus states, keyboard support,
-/// hover-revealed Edit/Delete (delete asks to be clicked twice) and drag-to-reorder.
+/// One audio card: custom painted, diff-reusable across renders, with hover/focus states,
+/// keyboard support, right-click dark context menu, inline Edit/Delete, and drag-to-reorder.
 /// </summary>
 internal sealed class CardControl : Control
 {
@@ -252,18 +435,21 @@ internal sealed class CardControl : Control
         TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
 
     private readonly System.Windows.Forms.Timer _confirmTimer = new() { Interval = 2500 };
+    private readonly ContextMenuStrip _contextMenu = new();
     private bool _hover, _hoverEdit, _hoverDel, _confirmDelete, _pressed, _downOnButton, _keyboardFocus;
-    private bool _isActive, _outMissing, _inMissing;
+    private bool _isActive, _isFallback, _outMissing, _commMissing, _inMissing;
     private string? _slotText;
     private Point _downPoint;
 
-    public AudioCard Card { get; }
+    public AudioCard Card { get; private set; }
 
     /// <summary>DPI scale factor (1.0 = 96 dpi), set by the parent.</summary>
     public new float Scale { get; set; } = 1f;
 
     public event Action<AudioCard>? ActivateRequested;
     public event Action<AudioCard>? EditRequested;
+    public event Action<AudioCard>? DuplicateRequested;
+    public event Action<AudioCard>? SetFallbackRequested;
     public event Action<AudioCard>? DeleteRequested;
 
     public CardControl(AudioCard card)
@@ -275,11 +461,30 @@ internal sealed class CardControl : Control
         TabStop = true;
         Cursor = Cursors.Hand;
         BackColor = Theme.BgMain;
+
         _confirmTimer.Tick += (_, _) => { _confirmTimer.Stop(); _confirmDelete = false; Invalidate(); };
+
+        _contextMenu.Renderer = new DarkMenuRenderer();
+        _contextMenu.BackColor = Theme.BgCard;
+        _contextMenu.ForeColor = Theme.TextPrimary;
+        _contextMenu.Font = Theme.Body;
+        _contextMenu.Opening += (_, _) => PopulateContextMenu();
+        ContextMenuStrip = _contextMenu;
     }
 
+    public void BindCard(AudioCard card)
+    {
+        Card = card;
+        Invalidate();
+    }
+
+    public int PreferredHeight(float scale) =>
+        Card.CommOutputId.HasValue ? (int)Math.Round(97 * scale) : (int)Math.Round(78 * scale);
+
     public bool IsActive { get => _isActive; set => Upd(ref _isActive, value); }
+    public bool IsFallback { get => _isFallback; set => Upd(ref _isFallback, value); }
     public bool OutMissing { get => _outMissing; set => Upd(ref _outMissing, value); }
+    public bool CommMissing { get => _commMissing; set => Upd(ref _commMissing, value); }
     public bool InMissing { get => _inMissing; set => Upd(ref _inMissing, value); }
 
     public string? SlotText
@@ -293,6 +498,32 @@ internal sealed class CardControl : Control
         if (field == value) return;
         field = value;
         Invalidate();
+    }
+
+    private void PopulateContextMenu()
+    {
+        var items = _contextMenu.Items;
+        foreach (var old in items.Cast<ToolStripItem>().ToList())
+        {
+            items.Remove(old);
+            old.Dispose();
+        }
+
+        items.Add("Activate", null, (_, _) => ActivateRequested?.Invoke(Card));
+        items.Add("Edit", null, (_, _) => EditRequested?.Invoke(Card));
+        items.Add("Duplicate", null, (_, _) => DuplicateRequested?.Invoke(Card));
+
+        var fbItem = new ToolStripMenuItem("Use as Fallback") { Checked = _isFallback };
+        fbItem.Click += (_, _) => SetFallbackRequested?.Invoke(Card);
+        items.Add(fbItem);
+
+        items.Add(new ToolStripSeparator());
+        items.Add("Delete", null, (_, _) =>
+        {
+            _confirmTimer.Stop();
+            _confirmDelete = false;
+            DeleteRequested?.Invoke(Card);
+        });
     }
 
     private int P(int v) => (int)Math.Round(v * Scale);
@@ -443,12 +674,22 @@ internal sealed class CardControl : Control
         }
 
         bool showButtons = ButtonsVisible;
-        int nameRight = showButtons ? EditRect().X - P(6) : Width - P(12) - (_isActive ? P(58) : 0);
+        int badgeSpace = _isActive ? P(58) : (_isFallback ? P(40) : 0);
+        int nameRight = showButtons ? EditRect().X - P(6) : Width - P(12) - badgeSpace;
         TextRenderer.DrawText(g, Card.Name, Theme.Title,
             new Rectangle(left, P(8), Math.Max(P(40), nameRight - left), P(24)), Theme.TextPrimary, TextFlags);
 
-        DrawDeviceRow(g, "OUT", Card.OutputId.HasValue ? Card.OutputName : null, _outMissing, left, P(36));
-        DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, _inMissing, left, P(55));
+        DrawDeviceRow(g, "OUT", Card.OutputId.HasValue ? Card.OutputName : null, Card.OutputVolume, _outMissing, left, P(36));
+
+        if (Card.CommOutputId.HasValue)
+        {
+            DrawDeviceRow(g, "COMM", Card.CommOutputName, null, _commMissing, left, P(55));
+            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(74));
+        }
+        else
+        {
+            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(55));
+        }
 
         if (showButtons)
         {
@@ -463,17 +704,27 @@ internal sealed class CardControl : Control
             TextRenderer.DrawText(g, "ACTIVE", Theme.SmallBold, pill, Theme.Accent,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
+        else if (_isFallback)
+        {
+            var pill = new Rectangle(Width - P(10) - P(30), P(11), P(30), P(18));
+            using var pp = Gfx.RoundRect(pill, P(9));
+            using (var fill = new SolidBrush(Theme.BgBorder)) g.FillPath(fill, pp);
+            TextRenderer.DrawText(g, "FB", Theme.SmallBold, pill, Theme.TextSoft,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
     }
 
-    private void DrawDeviceRow(Graphics g, string tag, string? name, bool missing, int left, int y)
+    private void DrawDeviceRow(Graphics g, string tag, string? name, int? volume, bool missing, int left, int y)
     {
-        TextRenderer.DrawText(g, tag, Theme.SmallBold, new Rectangle(left, y, P(30), P(18)), Theme.TextMuted, TextFlags);
+        int tagW = P(38);
+        TextRenderer.DrawText(g, tag, Theme.SmallBold, new Rectangle(left, y, tagW, P(18)), Theme.TextMuted, TextFlags);
 
         string text = name ?? "Not changed";
+        if (volume.HasValue) text += $"  · {volume.Value}%";
         if (missing) text += "  (not connected)";
-        var color = missing ? Theme.Warning : (name == null ? Theme.TextMuted : Theme.TextSoft);
+        var color = missing ? Theme.Warning : (name == null && !volume.HasValue ? Theme.TextMuted : Theme.TextSoft);
 
-        int x = left + P(30);
+        int x = left + tagW;
         TextRenderer.DrawText(g, text, Theme.Small,
             new Rectangle(x, y, Math.Max(P(20), Width - P(12) - x), P(18)), color, TextFlags);
     }
@@ -506,17 +757,23 @@ internal sealed class CardControl : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _confirmTimer.Dispose();
+        if (disposing)
+        {
+            _confirmTimer.Dispose();
+            _contextMenu.Dispose();
+        }
         base.Dispose(disposing);
     }
 }
 
-/// <summary>Always-on-top, click-through, never-activating window.</summary>
+/// <summary>Always-on-top, click-through, never-activating PerMonitorV2-aware overlay window.</summary>
 internal abstract class OverlayForm : Form
 {
+    private readonly List<Font> _ownedFonts = new();
+
     protected OverlayForm()
     {
-        AutoScaleMode = AutoScaleMode.None; // sizes are scaled by hand from DeviceDpi
+        AutoScaleMode = AutoScaleMode.None; // sizes & pixel fonts are scaled explicitly from DeviceDpi
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
@@ -524,7 +781,50 @@ internal abstract class OverlayForm : Form
         DoubleBuffered = true;
     }
 
-    protected float Dpi => DeviceDpi / 96f;
+    protected float Dpi => Math.Max(0.5f, DeviceDpi / 96f);
+
+    protected int Px(int logicalPx) => (int)Math.Round(logicalPx * Dpi);
+
+    protected Font CreateDpiFont(float ptAt96Dpi, FontStyle style)
+    {
+        float pxSize = Math.Max(8f, ptAt96Dpi * (96f / 72f) * Dpi);
+        var f = new Font("Segoe UI", pxSize, style, GraphicsUnit.Pixel);
+        _ownedFonts.Add(f);
+        return f;
+    }
+
+    protected void ClearOwnedFonts()
+    {
+        foreach (var f in _ownedFonts) f.Dispose();
+        _ownedFonts.Clear();
+    }
+
+    protected static Rectangle? TryGetWorkingArea(Screen? preferred)
+    {
+        try
+        {
+            var screen = preferred ?? Screen.PrimaryScreen;
+            if (screen == null)
+            {
+                var all = Screen.AllScreens;
+                if (all.Length > 0) screen = all[0];
+            }
+            return screen?.WorkingArea;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    protected abstract void ApplyDpiLayout();
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyDpiLayout();
+        Invalidate();
+    }
 
     protected override bool ShowWithoutActivation => true;
 
@@ -537,40 +837,60 @@ internal abstract class OverlayForm : Form
             return cp;
         }
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) ClearOwnedFonts();
+        base.Dispose(disposing);
+    }
 }
 
 internal sealed class OsdBannerForm : OverlayForm
 {
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1600 };
-    private readonly Label _catLbl;
-    private readonly Label _msgLbl;
+    private readonly Label _catLbl = new();
+    private readonly Label _msgLbl = new() { AutoEllipsis = true };
     private Color _accent = Theme.Accent;
+    private Rectangle? _targetArea;
 
     public OsdBannerForm()
     {
-        float k = Dpi;
-        Size = new Size((int)(340 * k), (int)(60 * k));
         BackColor = Color.FromArgb(20, 22, 27);
         Opacity = 0.94;
 
-        _catLbl = new Label
-        {
-            Font = Theme.SmallBold,
-            ForeColor = Theme.TextMuted,
-            Location = new Point((int)(16 * k), (int)(10 * k)),
-            Size = new Size((int)(308 * k), (int)(16 * k))
-        };
-        _msgLbl = new Label
-        {
-            Font = Theme.Title,
-            ForeColor = Theme.TextPrimary,
-            Location = new Point((int)(16 * k), (int)(28 * k)),
-            Size = new Size((int)(308 * k), (int)(24 * k)),
-            AutoEllipsis = true
-        };
+        _catLbl.ForeColor = Theme.TextMuted;
+        _msgLbl.ForeColor = Theme.TextPrimary;
         Controls.AddRange(new Control[] { _catLbl, _msgLbl });
 
+        ApplyDpiLayout();
         _timer.Tick += (_, _) => { _timer.Stop(); Hide(); };
+    }
+
+    protected override void ApplyDpiLayout()
+    {
+        var oldFonts = _catLbl.Font; // keep valid font assigned before clearing
+        _ = oldFonts;
+        var catFont = new Font("Segoe UI", Math.Max(8f, 7.5f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
+        var msgFont = new Font("Segoe UI", Math.Max(10f, 10f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
+
+        _catLbl.Font = catFont;
+        _msgLbl.Font = msgFont;
+        ClearOwnedFonts();
+        _catLbl.Font = CreateDpiFont(7.5f, FontStyle.Bold);
+        _msgLbl.Font = CreateDpiFont(10f, FontStyle.Bold);
+        catFont.Dispose();
+        msgFont.Dispose();
+
+        Size = new Size(Px(340), Px(60));
+        _catLbl.Location = new Point(Px(16), Px(10));
+        _catLbl.Size = new Size(Px(308), Px(16));
+        _msgLbl.Location = new Point(Px(16), Px(28));
+        _msgLbl.Size = new Size(Px(308), Px(24));
+
+        if (_targetArea is { } area)
+        {
+            Location = new Point(area.Left + (area.Width - Width) / 2, area.Bottom - Height - Px(36));
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -579,18 +899,23 @@ internal sealed class OsdBannerForm : OverlayForm
         using var border = new Pen(Theme.BgBorder, 1);
         e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
         using var bar = new SolidBrush(_accent);
-        e.Graphics.FillRectangle(bar, 0, 0, (int)(4 * Dpi), Height);
+        e.Graphics.FillRectangle(bar, 0, 0, Math.Max(2, Px(4)), Height);
     }
 
     public void ShowMessage(string category, string message, Color accentColor)
     {
+        Screen? activeScreen = null;
+        try { activeScreen = Screen.FromPoint(Cursor.Position); } catch { }
+        var area = TryGetWorkingArea(activeScreen);
+        if (area == null) return;
+
         _accent = accentColor;
         _catLbl.Text = category;
         _msgLbl.Text = message;
+        _targetArea = area.Value;
 
-        // Show on whichever monitor the user is currently working on.
-        var area = Screen.FromPoint(Cursor.Position).WorkingArea;
-        Location = new Point(area.Left + (area.Width - Width) / 2, area.Bottom - Height - (int)(36 * Dpi));
+        Location = new Point(area.Value.Left + (area.Value.Width - Width) / 2, area.Value.Bottom - Height - Px(36));
+        ApplyDpiLayout();
         Invalidate();
         if (!Visible) Show();
         _timer.Stop();
@@ -606,21 +931,39 @@ internal sealed class OsdBannerForm : OverlayForm
 
 internal sealed class MuteBannerForm : OverlayForm
 {
+    private readonly Label _label;
+    private MuteBannerPosition _position = MuteBannerPosition.TopCenter;
+    private Rectangle? _targetArea;
+
     public MuteBannerForm()
     {
-        float k = Dpi;
-        Size = new Size((int)(124 * k), (int)(30 * k));
         BackColor = Color.FromArgb(32, 18, 20);
         Opacity = 0.92;
 
-        Controls.Add(new Label
+        _label = new Label
         {
             Text = "● MIC MUTED",
-            Font = Theme.BodyBold,
             ForeColor = Color.FromArgb(245, 90, 93),
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter
-        });
+        };
+        Controls.Add(_label);
+        ApplyDpiLayout();
+    }
+
+    protected override void ApplyDpiLayout()
+    {
+        var tempFont = new Font("Segoe UI", Math.Max(9f, 8.5f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
+        _label.Font = tempFont;
+        ClearOwnedFonts();
+        _label.Font = CreateDpiFont(8.5f, FontStyle.Bold);
+        tempFont.Dispose();
+
+        Size = new Size(Px(128), Px(30));
+        if (_targetArea is { } area)
+        {
+            Location = ProfileLogic.ComputeMuteBannerLocation(area, Size, _position, Dpi);
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -630,10 +973,22 @@ internal sealed class MuteBannerForm : OverlayForm
         e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
     }
 
-    public void ShowBanner()
+    public void ShowBanner(MuteBannerPosition position = MuteBannerPosition.TopCenter)
     {
-        var area = Screen.PrimaryScreen!.WorkingArea;
-        Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (int)(14 * Dpi));
+        Screen? preferred = null;
+        if (position == MuteBannerPosition.ActiveScreenTop)
+        {
+            try { preferred = Screen.FromPoint(Cursor.Position); } catch { }
+        }
+
+        var area = TryGetWorkingArea(preferred);
+        if (area == null) return;
+
+        _position = position;
+        _targetArea = area.Value;
+        Location = ProfileLogic.ComputeMuteBannerLocation(area.Value, Size, position, Dpi);
+        ApplyDpiLayout();
+        Invalidate();
         if (!Visible) Show();
     }
 }

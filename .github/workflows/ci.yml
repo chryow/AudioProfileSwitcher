@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build solution (warnings as errors)
+        run: dotnet build AudioProfileSwitcher.sln -c Release -warnaserror
+
+      - name: Run unit tests
+        run: dotnet test AudioProfileSwitcher.sln -c Release --no-build --verbosity normal
+
+      - name: Publish single-file EXE
+        run: dotnet publish AudioProfileSwitcher.csproj -c Release -r win-x64 --no-self-contained -p:PublishSingleFile=true -o publish
+
+      - name: Upload EXE Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioProfileSwitcher-win-x64
+          path: publish/AudioProfileSwitcher.exe
