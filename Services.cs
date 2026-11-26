@@ -655,7 +655,16 @@ internal static class UpdateService
 
     private static HttpClient CreateClient()
     {
-        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 3
+        };
+        var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(8),
+            MaxResponseContentBufferSize = ProfileLogic.MaxUpdateResponseBytes
+        };
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AudioProfileSwitcher", AppInfo.Version));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return client;
@@ -663,9 +672,38 @@ internal static class UpdateService
 
     public static async Task<ReleaseCheckResult> CheckForUpdatesAsync(CancellationToken ct = default)
     {
-        using var resp = await Http.GetAsync(AppInfo.LatestReleaseApiUrl, ct).ConfigureAwait(false);
+        using var resp = await Http.GetAsync(
+            AppInfo.LatestReleaseApiUrl,
+            HttpCompletionOption.ResponseHeadersRead,
+            ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+        var finalUri = resp.RequestMessage?.RequestUri;
+        if (finalUri == null ||
+            !finalUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+            !finalUri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Unexpected update server host.");
+        }
+
+        if (resp.Content.Headers.ContentLength > ProfileLogic.MaxUpdateResponseBytes)
+            throw new InvalidDataException("Update metadata response exceeded size limit.");
+
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int total = 0;
+        while (true)
+        {
+            int read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+            if (read == 0) break;
+            total += read;
+            if (total > ProfileLogic.MaxUpdateResponseBytes)
+                throw new InvalidDataException("Update metadata response exceeded size limit.");
+            ms.Write(buffer, 0, read);
+        }
+
+        var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
         return ProfileLogic.ParseLatestRelease(json, AppInfo.Version);
     }
 }
@@ -680,9 +718,11 @@ internal sealed class HotKeyService : NativeWindow, IDisposable
     private int _nextId = 1;
 
     [DllImport("user32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
     [DllImport("user32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     public HotKeyService()

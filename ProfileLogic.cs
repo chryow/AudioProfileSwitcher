@@ -571,21 +571,76 @@ public static class ProfileLogic
         return JsonSerializer.Serialize(bundle, ExportJsonOpts);
     }
 
+    public const int MaxProfileJsonBytes = 1024 * 1024; // 1 MiB
+    public const int MaxUpdateResponseBytes = 256 * 1024; // 256 KiB
+    public const int MaxImportedCards = 100;
+    public const int MaxImportedCycleEntries = 200;
+    public const int MaxNameLength = 128;
+
+    public static string SanitizeDisplayString(string? value, int maxLength = MaxNameLength, string fallback = "")
+    {
+        if (string.IsNullOrWhiteSpace(value)) return fallback;
+        var sb = new StringBuilder(Math.Min(value.Length, maxLength));
+        foreach (char ch in value)
+        {
+            if (char.IsControl(ch)) continue;
+            sb.Append(ch);
+            if (sb.Length >= maxLength) break;
+        }
+        var result = sb.ToString().Trim();
+        return result.Length == 0 ? fallback : result;
+    }
+
+    /// <summary>
+    /// Validates that a release URL points strictly to HTTPS on github.com under this repository's releases path.
+    /// Prevents unsafe schemes (file://, UNC, custom protocol handlers) from ever reaching ShellExecute.
+    /// </summary>
+    public static string SanitizeReleaseUrl(string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate)) return AppInfo.ReleasesPageUrl;
+        if (!Uri.TryCreate(candidate.Trim(), UriKind.Absolute, out var uri))
+            return AppInfo.ReleasesPageUrl;
+
+        bool valid =
+            uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+            uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+            uri.IsDefaultPort &&
+            string.IsNullOrEmpty(uri.UserInfo) &&
+            uri.AbsolutePath.StartsWith("/chryow/AudioProfileSwitcher/releases", StringComparison.OrdinalIgnoreCase);
+
+        return valid ? uri.AbsoluteUri : AppInfo.ReleasesPageUrl;
+    }
+
     /// <summary>
     /// Imports cards and cycle filters from either a ProfileExportBundle or a full AppConfig JSON file,
-    /// merging new cards by ID/name and relinking against the current machine's connected devices.
+    /// enforcing size/count/string bounds, merging new cards by ID, and relinking against connected devices.
     /// </summary>
     public static (int AddedCards, int AddedFilters) ImportProfilesJson(
         string json,
         AppConfig targetConfig,
         AudioSnapshot? currentSnap = null)
     {
+        if (string.IsNullOrWhiteSpace(json))
+            throw new InvalidDataException("Empty profile file.");
+        if (Encoding.UTF8.GetByteCount(json) > MaxProfileJsonBytes)
+            throw new InvalidDataException($"Profile file exceeds the {MaxProfileJsonBytes / 1024} KB safety limit.");
+
         var bundle = JsonSerializer.Deserialize<ProfileExportBundle>(json, ExportJsonOpts)
             ?? throw new InvalidDataException("Empty profile file.");
+
+        if (bundle.Cards.Count > MaxImportedCards)
+            throw new InvalidDataException($"Profile file contains too many cards (max {MaxImportedCards}).");
+        if (bundle.CycleOutputs.Count > MaxImportedCycleEntries || bundle.CycleInputs.Count > MaxImportedCycleEntries)
+            throw new InvalidDataException($"Profile file contains too many cycle filter entries (max {MaxImportedCycleEntries}).");
 
         int addedCards = 0;
         foreach (var incoming in bundle.Cards)
         {
+            if (incoming == null) continue;
+            incoming.Name = SanitizeDisplayString(incoming.Name, MaxNameLength, "Untitled Card");
+            incoming.OutputName = SanitizeDisplayString(incoming.OutputName, MaxNameLength, "None");
+            incoming.CommOutputName = SanitizeDisplayString(incoming.CommOutputName, MaxNameLength, "None");
+            incoming.InputName = SanitizeDisplayString(incoming.InputName, MaxNameLength, "None");
             if (incoming.OutputVolume.HasValue) incoming.OutputVolume = Math.Clamp(incoming.OutputVolume.Value, 0, 100);
             if (incoming.InputVolume.HasValue) incoming.InputVolume = Math.Clamp(incoming.InputVolume.Value, 0, 100);
 
@@ -596,6 +651,8 @@ public static class ProfileLogic
             }
             else
             {
+                if (targetConfig.Cards.Count >= MaxImportedCards)
+                    throw new InvalidDataException($"Cannot exceed {MaxImportedCards} total profile cards.");
                 if (incoming.Id == Guid.Empty) incoming.Id = Guid.NewGuid();
                 targetConfig.Cards.Add(incoming);
                 addedCards++;
@@ -605,18 +662,24 @@ public static class ProfileLogic
         int addedFilters = 0;
         foreach (var fo in bundle.CycleOutputs)
         {
+            if (fo == null) continue;
+            fo.Name = SanitizeDisplayString(fo.Name, MaxNameLength, "");
             if (targetConfig.CycleOutputs.Any(x => x.Id == fo.Id ||
                 (IsMeaningfulDeviceName(fo.Name) && x.Name.Equals(fo.Name, StringComparison.OrdinalIgnoreCase))))
                 continue;
+            if (targetConfig.CycleOutputs.Count >= MaxImportedCycleEntries) break;
             targetConfig.CycleOutputs.Add(fo);
             addedFilters++;
         }
 
         foreach (var fi in bundle.CycleInputs)
         {
+            if (fi == null) continue;
+            fi.Name = SanitizeDisplayString(fi.Name, MaxNameLength, "");
             if (targetConfig.CycleInputs.Any(x => x.Id == fi.Id ||
                 (IsMeaningfulDeviceName(fi.Name) && x.Name.Equals(fi.Name, StringComparison.OrdinalIgnoreCase))))
                 continue;
+            if (targetConfig.CycleInputs.Count >= MaxImportedCycleEntries) break;
             targetConfig.CycleInputs.Add(fi);
             addedFilters++;
         }
@@ -644,13 +707,16 @@ public static class ProfileLogic
 
     public static ReleaseCheckResult ParseLatestRelease(string releaseJson, string currentVersion = AppInfo.Version)
     {
+        if (Encoding.UTF8.GetByteCount(releaseJson) > MaxUpdateResponseBytes)
+            throw new InvalidDataException("Update metadata response exceeded size limit.");
+
         using var doc = JsonDocument.Parse(releaseJson);
         var root = doc.RootElement;
 
-        string tag = root.TryGetProperty("tag_name", out var tagProp) ? (tagProp.GetString() ?? "") : "";
-        string url = root.TryGetProperty("html_url", out var urlProp) && !string.IsNullOrWhiteSpace(urlProp.GetString())
-            ? urlProp.GetString()!
-            : AppInfo.ReleasesPageUrl;
+        string rawTag = root.TryGetProperty("tag_name", out var tagProp) ? (tagProp.GetString() ?? "") : "";
+        string tag = SanitizeDisplayString(rawTag, 32, "");
+        string rawUrl = root.TryGetProperty("html_url", out var urlProp) ? (urlProp.GetString() ?? "") : "";
+        string url = SanitizeReleaseUrl(rawUrl);
 
         string cleanLatest = tag.Trim().TrimStart('v', 'V');
         string cleanCurrent = currentVersion.Trim().TrimStart('v', 'V');
