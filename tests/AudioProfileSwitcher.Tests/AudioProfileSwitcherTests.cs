@@ -34,13 +34,28 @@ public sealed class AudioProfileSwitcherTests
     }
 
     [Fact]
+    public void ParseEndpointGuid_ExtractsWindowsCoreAudioEndpointGuid()
+    {
+        var expected = Guid.Parse("a1b2c3d4-e5f6-4789-abcd-0123456789ab");
+        string winEndpointId = $"{{0.0.0.00000000}}.{{{expected}}}";
+
+        Assert.Equal(expected, ProfileLogic.ParseEndpointGuid(winEndpointId));
+        Assert.Equal(expected, ProfileLogic.ParseEndpointGuid(expected.ToString()));
+
+        // Non-standard driver string hashes deterministically:
+        var fallback1 = ProfileLogic.ParseEndpointGuid("custom-driver-endpoint-1");
+        var fallback2 = ProfileLogic.ParseEndpointGuid("CUSTOM-DRIVER-ENDPOINT-1");
+        Assert.NotEqual(Guid.Empty, fallback1);
+        Assert.Equal(fallback1, fallback2);
+    }
+
+    [Fact]
     public void AudioSnapshot_EqualsState_DetectsMatchingAndChangedStates()
     {
         var outA = Guid.NewGuid();
         var outB = Guid.NewGuid();
         var inA = Guid.NewGuid();
 
-        // Insertion order differs, structural content is identical.
         var snap1 = MakeSnapshot(
             new[] { (outA, "Speakers"), (outB, "Headphones") },
             new[] { (inA, "Yeti Mic") },
@@ -94,17 +109,14 @@ public sealed class AudioProfileSwitcherTests
 
         var (firstHz, secondHz) = ChimeSynth.GetFrequencies(cue);
         if (cue == ChimeCue.Muted)
-            Assert.True(firstHz > secondHz); // A5 -> D5 descending
+            Assert.True(firstHz > secondHz);
         else
-            Assert.True(firstHz < secondHz); // E5 -> A5 / E5 -> B5 ascending
+            Assert.True(firstHz < secondHz);
 
         var samples = ChimeSynth.SynthesizeSamples(firstHz, secondHz);
         Assert.Equal(0, samples[0]);
         Assert.Equal(0, samples[^1]);
 
-        // Continuous phase integration check across the tone transition at splitSample:
-        // Maximum single-sample step for <= 1000 Hz at 44.1 kHz with amplitude 6000 is ~ 2*pi*1000/44100 * 6000 ≈ 855.
-        // Without phase continuity, E5->A5 jumped by > 9000 LSB!
         int split = samples.Length / 2;
         int transitionDelta = Math.Abs(samples[split] - samples[split - 1]);
         Assert.True(transitionDelta < 1100, $"Expected smooth phase transition, got delta={transitionDelta}");
@@ -285,7 +297,6 @@ public sealed class AudioProfileSwitcherTests
 
         cfg.FallbackMode = FallbackMode.SpecificCard;
         cfg.FallbackCardId = backup.Id;
-        // Backup is already active in afterUnplug (defaultOut == backupOut & defaultIn == mic), so should not re-trigger:
         Assert.Null(ProfileLogic.ResolveFallbackCard(cfg, beforeSwitch, afterUnplug, removed));
 
         var afterUnplugDeskDefault = afterUnplug with { DefaultOut = deskOut, OutName = "Speakers" };
@@ -304,7 +315,6 @@ public sealed class AudioProfileSwitcherTests
         var d3 = (Id: Guid.NewGuid(), Name: "Headphones (USB)");
         var all = new[] { d1, d2, d3 };
 
-        // Filter has stale GUID for Headphones but matching Name:
         var filter = new[]
         {
             new CycleDeviceEntry { Id = d2.Id, Name = d2.Name },
@@ -335,7 +345,7 @@ public sealed class AudioProfileSwitcherTests
     }
 
     [Fact]
-    public void LayoutHelpers_ComputeBannerPositionsAndClampOffscreenWindows()
+    public void LayoutHelpers_ComputeBannerPositionsCustomDragAndClampBounds()
     {
         var area = new Rectangle(0, 0, 1920, 1040);
         var banner = new Size(128, 30);
@@ -344,7 +354,14 @@ public sealed class AudioProfileSwitcherTests
         Assert.Equal(new Point(1776, 14), ProfileLogic.ComputeMuteBannerLocation(area, banner, MuteBannerPosition.TopRight, 1f));
         Assert.Equal(new Point(1776, 996), ProfileLogic.ComputeMuteBannerLocation(area, banner, MuteBannerPosition.BottomRight, 1f));
 
-        // Window saved on a disconnected second monitor at X=2400 clamps back onto primary screen:
+        // Custom dragged coordinates clamp inside the screen working area:
+        Assert.Equal(new Point(320, 48), ProfileLogic.ComputeMuteBannerLocation(area, banner, MuteBannerPosition.Custom, 1f, 320, 48));
+        Assert.Equal(new Point(1920 - 128, 1040 - 30), ProfileLogic.ComputeMuteBannerLocation(area, banner, MuteBannerPosition.Custom, 1f, 5000, 3000));
+
+        Assert.Equal(420, ProfileLogic.ClampWindowHeight(200));
+        Assert.Equal(740, ProfileLogic.ClampWindowHeight(740));
+        Assert.Equal(620, ProfileLogic.ClampWindowHeight(null));
+
         var clamped = ProfileLogic.ClampWindowLocation(new Point(2400, 120), new Size(380, 620), new[] { area });
         Assert.InRange(clamped.X, 0, 1920 - 380);
         Assert.Equal(120, clamped.Y);
@@ -381,7 +398,6 @@ public sealed class AudioProfileSwitcherTests
         var t1 = coalescer.RunAsync(allowAutoEvents: false, force: false);
         await firstEntered.Task;
 
-        // Queue multiple overlapping requests while first run is in flight:
         var t2 = coalescer.RunAsync(allowAutoEvents: true, force: false);
         var t3 = coalescer.RunAsync(allowAutoEvents: false, force: true);
         var t4 = coalescer.RunAsync(allowAutoEvents: false, force: false);
@@ -392,21 +408,95 @@ public sealed class AudioProfileSwitcherTests
         Assert.Equal(1, maxConcurrent);
         Assert.Equal(2, runs.Count);
         Assert.Equal((false, false), runs[0]);
-        Assert.Equal((true, true), runs[1]); // OR-merged flags across t2, t3, t4
+        Assert.Equal((true, true), runs[1]);
     }
 
     [Fact]
-    public void FindHotKeyConflict_DetectsDuplicateAndJumpSlotClashes()
+    public void FindHotKeyConflict_SupportsToggleWindowAndDisabledBindings()
     {
         var cfg = new AppConfig { JumpHotKeysEnabled = true };
-        Assert.Equal("Cycle Output", ProfileLogic.FindHotKeyConflict(
+
+        Assert.Equal("Show / Hide Window", ProfileLogic.FindHotKeyConflict(
             cfg,
-            HotKeyTarget.Input,
-            new HotKeyBinding { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.O }));
+            HotKeyTarget.Mute,
+            new HotKeyBinding { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.Space }));
 
         Assert.Equal("Jump to card", ProfileLogic.FindHotKeyConflict(
             cfg,
-            HotKeyTarget.Mute,
+            HotKeyTarget.ToggleWindow,
             new HotKeyBinding { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.D3 }));
+
+        var disabled = new HotKeyBinding { Modifiers = HotKeyModifiers.None, Key = Keys.None };
+        Assert.False(disabled.IsEnabled);
+        Assert.Equal("Disabled", disabled.Format());
+        Assert.Null(ProfileLogic.FindHotKeyConflict(cfg, HotKeyTarget.ToggleWindow, disabled));
+    }
+
+    [Fact]
+    public void ExportAndImportProfiles_RoundTripsAndRelinksAcrossMachines()
+    {
+        var oldOut = Guid.NewGuid();
+        var oldIn = Guid.NewGuid();
+        var newMachineOut = Guid.NewGuid();
+        var newMachineIn = Guid.NewGuid();
+
+        var source = new AppConfig
+        {
+            FallbackMode = FallbackMode.PreviousCard,
+            Cards =
+            {
+                new AudioCard
+                {
+                    Name = "Desk Setup",
+                    OutputId = oldOut,
+                    OutputName = "Speakers (USB DAC)",
+                    InputId = oldIn,
+                    InputName = "Microphone (Wave:3)",
+                    OutputVolume = 65,
+                    InputVolume = 95
+                }
+            },
+            CycleOutputs =
+            {
+                new CycleDeviceEntry { Id = oldOut, Name = "Speakers (USB DAC)" }
+            }
+        };
+
+        string json = ProfileLogic.ExportProfilesJson(source);
+
+        var dest = new AppConfig();
+        var newMachineSnap = MakeSnapshot(
+            new[] { (newMachineOut, "Speakers (USB DAC)") },
+            new[] { (newMachineIn, "Microphone (Wave:3)") },
+            defaultOut: newMachineOut,
+            defaultIn: newMachineIn);
+
+        var (addedCards, addedFilters) = ProfileLogic.ImportProfilesJson(json, dest, newMachineSnap);
+        Assert.Equal(1, addedCards);
+        Assert.Equal(1, addedFilters);
+        Assert.Equal(FallbackMode.PreviousCard, dest.FallbackMode);
+        Assert.Equal(newMachineOut, dest.Cards[0].OutputId);
+        Assert.Equal(newMachineIn, dest.Cards[0].InputId);
+        Assert.Equal(65, dest.Cards[0].OutputVolume);
+        Assert.Equal(newMachineOut, dest.CycleOutputs[0].Id);
+    }
+
+    [Fact]
+    public void ParseLatestRelease_ComparesSemanticVersionsCleanly()
+    {
+        const string newerJson = """
+        {
+          "tag_name": "v1.4.0",
+          "html_url": "https://github.com/chryow/AudioProfileSwitcher/releases/tag/v1.4.0"
+        }
+        """;
+
+        var newer = ProfileLogic.ParseLatestRelease(newerJson, "1.3.0");
+        Assert.True(newer.UpdateAvailable);
+        Assert.Equal("v1.4.0", newer.LatestVersion);
+        Assert.Equal("https://github.com/chryow/AudioProfileSwitcher/releases/tag/v1.4.0", newer.ReleaseUrl);
+
+        var same = ProfileLogic.ParseLatestRelease(newerJson, "1.4.0");
+        Assert.False(same.UpdateAvailable);
     }
 }

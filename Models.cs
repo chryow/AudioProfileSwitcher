@@ -3,6 +3,13 @@ using System.Text.Json.Serialization;
 
 namespace AudioProfileSwitcher;
 
+public static class AppInfo
+{
+    public const string Version = "1.3.0";
+    public const string ReleasesPageUrl = "https://github.com/chryow/AudioProfileSwitcher/releases";
+    public const string LatestReleaseApiUrl = "https://api.github.com/repos/chryow/AudioProfileSwitcher/releases/latest";
+}
+
 #if !WINDOWS
 /// <summary>Minimal Win32 virtual-key subset so shared models compile cleanly on non-Windows test targets.</summary>
 [Flags]
@@ -58,7 +65,7 @@ public enum HotKeyModifiers : uint
     NoRepeat = 0x4000 // registration-only flag, never stored in config
 }
 
-public enum HotKeyTarget { Card, Output, Input, Mute }
+public enum HotKeyTarget { Card, Output, Input, Mute, ToggleWindow }
 
 public enum FallbackMode
 {
@@ -72,13 +79,17 @@ public enum MuteBannerPosition
     TopCenter = 0,
     TopRight = 1,
     BottomRight = 2,
-    ActiveScreenTop = 3
+    ActiveScreenTop = 3,
+    Custom = 4
 }
 
 public class HotKeyBinding
 {
     public HotKeyModifiers Modifiers { get; set; } = HotKeyModifiers.Control | HotKeyModifiers.Shift;
     public Keys Key { get; set; } = Keys.A;
+
+    [JsonIgnore]
+    public bool IsEnabled => Key != Keys.None && Modifiers != HotKeyModifiers.None;
 
     public string FormatModifiers()
     {
@@ -92,12 +103,14 @@ public class HotKeyBinding
 
     public string Format()
     {
+        if (!IsEnabled) return "Disabled";
         string key = Key >= Keys.D0 && Key <= Keys.D9 ? ((int)Key - (int)Keys.D0).ToString() : Key.ToString();
         var mods = FormatModifiers();
         return mods.Length == 0 ? key : mods + " + " + key;
     }
 
-    public bool SameAs(HotKeyBinding other) => Modifiers == other.Modifiers && Key == other.Key;
+    public bool SameAs(HotKeyBinding other) =>
+        IsEnabled && other.IsEnabled && Modifiers == other.Modifiers && Key == other.Key;
 }
 
 public class CycleDeviceEntry
@@ -156,6 +169,7 @@ public class AppConfig
     public HotKeyBinding OutputHotKey { get; set; } = new() { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.O };
     public HotKeyBinding InputHotKey { get; set; } = new() { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.I };
     public HotKeyBinding MuteHotKey { get; set; } = new() { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.M };
+    public HotKeyBinding ToggleWindowHotKey { get; set; } = new() { Modifiers = HotKeyModifiers.Control | HotKeyModifiers.Shift, Key = Keys.Space };
 
     public List<CycleDeviceEntry> CycleOutputs { get; set; } = new();
     public List<CycleDeviceEntry> CycleInputs { get; set; } = new();
@@ -171,10 +185,26 @@ public class AppConfig
     public bool MuteChimeEnabled { get; set; } = true;
     public bool JumpHotKeysEnabled { get; set; } = true;
     public bool MuteBannerEnabled { get; set; } = true;
+    public bool MuteBannerInteractive { get; set; }
     public MuteBannerPosition MuteBannerPosition { get; set; } = MuteBannerPosition.TopCenter;
+    public int? MuteBannerX { get; set; }
+    public int? MuteBannerY { get; set; }
     public int? WindowX { get; set; }
     public int? WindowY { get; set; }
+    public int? WindowHeight { get; set; }
     public bool TrayHintShown { get; set; }
+}
+
+/// <summary>Portable JSON bundle for exporting/importing cards and cycle filters across PCs.</summary>
+public sealed class ProfileExportBundle
+{
+    public string Version { get; set; } = AppInfo.Version;
+    public DateTime ExportedAtUtc { get; set; } = DateTime.UtcNow;
+    public List<AudioCard> Cards { get; set; } = new();
+    public FallbackMode FallbackMode { get; set; }
+    public Guid? FallbackCardId { get; set; }
+    public List<CycleDeviceEntry> CycleOutputs { get; set; } = new();
+    public List<CycleDeviceEntry> CycleInputs { get; set; } = new();
 }
 
 /// <summary>Item shown in combo boxes / checked lists. Id == null means "don't change".</summary>

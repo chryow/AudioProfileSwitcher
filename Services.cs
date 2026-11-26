@@ -1,7 +1,8 @@
 using System.Media;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
-using AudioSwitcher.AudioApi;
-using AudioSwitcher.AudioApi.CoreAudio;
+using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 
 namespace AudioProfileSwitcher;
 
@@ -17,27 +18,37 @@ public readonly record struct CycleResult(DeviceItem? Device, AudioSnapshot? Sna
 
 public readonly record struct MuteToggleResult(bool? Muted, AudioSnapshot? Snapshot);
 
-/// <summary>All Core Audio access lives here, serialized off the UI thread with event-driven notifications.</summary>
+/// <summary>
+/// All Windows CoreAudio access lives here via NAudio.Wasapi + native IPolicyConfig COM interop,
+/// serialized off the UI thread with event-driven IMMNotificationClient &amp; endpoint mute callbacks.
+/// </summary>
 public sealed class AudioService : IDisposable
 {
-    private readonly CoreAudioController _audio = new();
+    private readonly MMDeviceEnumerator _enumerator = new();
+    private readonly NotificationClient _notifClient;
     private readonly object _lock = new();
-    private IDisposable? _controllerSub;
-    private IDisposable? _captureMuteSub;
-    private Guid? _watchedCaptureId;
+    private MMDevice? _watchedCaptureDevice;
+    private string? _watchedCaptureRawId;
+    private bool _watchedCaptureMuted;
+    private bool _notifRegistered;
     private bool _disposed;
 
-    /// <summary>Fired (potentially off the UI thread) when endpoints, defaults, states, or mute state change.</summary>
+    /// <summary>Fired (potentially off the UI thread) when endpoints, defaults, states, or mic mute state change.</summary>
     public event Action? StateChanged;
+
+    private sealed record EndpointEntry(Guid Id, string RawId, string FullName, MMDevice Device);
 
     public AudioService()
     {
+        _notifClient = new NotificationClient(this);
         try
         {
             lock (_lock)
             {
-                _controllerSub = _audio.AudioDeviceChanged.Subscribe(new ActionObserver<DeviceChangedArgs>(OnControllerDeviceChanged));
-                EnsureCaptureMuteSubscriptionLocked(_audio.DefaultCaptureDevice);
+                _enumerator.RegisterEndpointNotificationCallback(_notifClient);
+                _notifRegistered = true;
+                using var curIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
+                EnsureCaptureMuteSubscriptionLocked(curIn?.ID);
             }
         }
         catch (Exception ex)
@@ -46,26 +57,19 @@ public sealed class AudioService : IDisposable
         }
     }
 
-    private void OnControllerDeviceChanged(DeviceChangedArgs e)
+    private void OnEndpointNotification(bool refreshCaptureWatch)
     {
-        if (e == null) return;
-
-        bool relevant = e.ChangedType is
-            DeviceChangedType.DefaultChanged or
-            DeviceChangedType.DeviceAdded or
-            DeviceChangedType.DeviceRemoved or
-            DeviceChangedType.StateChanged or
-            DeviceChangedType.MuteChanged;
-        if (!relevant) return;
-
         bool notify = false;
         lock (_lock)
         {
             if (_disposed) return;
-            if (e.ChangedType is DeviceChangedType.DefaultChanged or DeviceChangedType.DeviceAdded or
-                DeviceChangedType.DeviceRemoved or DeviceChangedType.StateChanged)
+            if (refreshCaptureWatch)
             {
-                try { EnsureCaptureMuteSubscriptionLocked(_audio.DefaultCaptureDevice); }
+                try
+                {
+                    using var curIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
+                    EnsureCaptureMuteSubscriptionLocked(curIn?.ID);
+                }
                 catch { /* endpoint may still be settling */ }
             }
             notify = true;
@@ -74,21 +78,57 @@ public sealed class AudioService : IDisposable
         if (notify) RaiseStateChanged();
     }
 
-    private void EnsureCaptureMuteSubscriptionLocked(CoreAudioDevice? capture)
+    private void EnsureCaptureMuteSubscriptionLocked(string? captureRawId)
     {
-        var newId = capture?.Id;
-        if (_watchedCaptureId == newId && (_captureMuteSub != null || newId == null))
-            return;
-
-        try { _captureMuteSub?.Dispose(); } catch { }
-        _captureMuteSub = null;
-        _watchedCaptureId = newId;
-
-        if (capture != null)
+        if (string.Equals(_watchedCaptureRawId, captureRawId, StringComparison.OrdinalIgnoreCase) &&
+            (_watchedCaptureDevice != null || captureRawId == null))
         {
-            _captureMuteSub = capture.MuteChanged.Subscribe(
-                new ActionObserver<DeviceMuteChangedArgs>(_ => RaiseStateChanged()));
+            return;
         }
+
+        ReleaseCaptureWatchLocked();
+        _watchedCaptureRawId = captureRawId;
+
+        if (!string.IsNullOrEmpty(captureRawId))
+        {
+            try
+            {
+                var dev = _enumerator.GetDevice(captureRawId);
+                _watchedCaptureMuted = dev.AudioEndpointVolume.Mute;
+                dev.AudioEndpointVolume.OnVolumeNotification += OnCaptureVolumeNotification;
+                _watchedCaptureDevice = dev;
+            }
+            catch
+            {
+                _watchedCaptureRawId = null;
+            }
+        }
+    }
+
+    private void ReleaseCaptureWatchLocked()
+    {
+        if (_watchedCaptureDevice != null)
+        {
+            try { _watchedCaptureDevice.AudioEndpointVolume.OnVolumeNotification -= OnCaptureVolumeNotification; } catch { }
+            try { _watchedCaptureDevice.Dispose(); } catch { }
+            _watchedCaptureDevice = null;
+        }
+    }
+
+    private void OnCaptureVolumeNotification(AudioVolumeNotificationData data)
+    {
+        bool changed = false;
+        lock (_lock)
+        {
+            if (_disposed) return;
+            if (data.Muted != _watchedCaptureMuted)
+            {
+                _watchedCaptureMuted = data.Muted;
+                changed = true;
+            }
+        }
+
+        if (changed) RaiseStateChanged();
     }
 
     private void RaiseStateChanged()
@@ -97,20 +137,87 @@ public sealed class AudioService : IDisposable
         catch (Exception ex) { AppLog.Error("AudioService StateChanged handler failed", ex); }
     }
 
-    private List<CoreAudioDevice> Outputs() =>
-        _audio.GetPlaybackDevices(DeviceState.Active)
-              .OrderBy(d => d.FullName, StringComparer.CurrentCultureIgnoreCase).ToList();
-
-    private List<CoreAudioDevice> Inputs() =>
-        _audio.GetCaptureDevices(DeviceState.Active)
-              .OrderBy(d => d.FullName, StringComparer.CurrentCultureIgnoreCase).ToList();
-
-    private static int SafeVolumePercent(CoreAudioDevice d)
+    private MMDevice? TryGetDefaultEndpoint(DataFlow flow, Role role)
     {
         try
         {
-            double v = d.Volume;
-            return double.IsNaN(v) || double.IsInfinity(v) ? 80 : Math.Clamp((int)Math.Round(v), 0, 100);
+            if (!_enumerator.HasDefaultAudioEndpoint(flow, role)) return null;
+            return _enumerator.GetDefaultAudioEndpoint(flow, role);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string? TryGetDefaultRawId(DataFlow flow, Role role)
+    {
+        using var d = TryGetDefaultEndpoint(flow, role);
+        return SafeGetRawId(d);
+    }
+
+    private static string? SafeGetRawId(MMDevice? d)
+    {
+        if (d == null) return null;
+        try { return d.ID; } catch { return null; }
+    }
+
+    private static string? SafeGetFriendlyName(MMDevice? d)
+    {
+        if (d == null) return null;
+        try { return d.FriendlyName; } catch { return null; }
+    }
+
+    private List<EndpointEntry> EnumerateEndpointsLocked(DataFlow flow)
+    {
+        var result = new List<EndpointEntry>();
+        MMDeviceCollection? col = null;
+        try
+        {
+            col = _enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active);
+            for (int i = 0; i < col.Count; i++)
+            {
+                MMDevice? d = null;
+                try
+                {
+                    d = col[i];
+                    string rawId = d.ID;
+                    string name = d.FriendlyName;
+                    Guid id = ProfileLogic.ParseEndpointGuid(rawId);
+                    result.Add(new EndpointEntry(id, rawId, name, d));
+                    d = null; // ownership transferred to EndpointEntry
+                }
+                catch
+                {
+                    d?.Dispose();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"Failed to enumerate {flow} audio endpoints", ex);
+        }
+
+        result.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.FullName, b.FullName));
+        return result;
+    }
+
+    private static void DisposeEntries(List<EndpointEntry>? entries)
+    {
+        if (entries == null) return;
+        foreach (var e in entries)
+        {
+            try { e.Device.Dispose(); } catch { }
+        }
+    }
+
+    private static int SafeVolumePercent(MMDevice d)
+    {
+        try
+        {
+            float scalar = d.AudioEndpointVolume.MasterVolumeLevelScalar;
+            if (float.IsNaN(scalar) || float.IsInfinity(scalar)) return 80;
+            return Math.Clamp((int)Math.Round(scalar * 100f), 0, 100);
         }
         catch { return 80; }
     }
@@ -121,34 +228,88 @@ public sealed class AudioService : IDisposable
             lock (_lock)
             {
                 if (_disposed) return (new List<DeviceItem>(), new List<DeviceItem>());
-                return (
-                    Outputs().Select(d => new DeviceItem(d.Id, d.FullName, true, SafeVolumePercent(d))).ToList(),
-                    Inputs().Select(d => new DeviceItem(d.Id, d.FullName, true, SafeVolumePercent(d))).ToList()
-                );
+                var outs = EnumerateEndpointsLocked(DataFlow.Render);
+                var ins = EnumerateEndpointsLocked(DataFlow.Capture);
+                try
+                {
+                    return (
+                        outs.Select(e => new DeviceItem(e.Id, e.FullName, true, SafeVolumePercent(e.Device))).ToList(),
+                        ins.Select(e => new DeviceItem(e.Id, e.FullName, true, SafeVolumePercent(e.Device))).ToList()
+                    );
+                }
+                finally
+                {
+                    DisposeEntries(outs);
+                    DisposeEntries(ins);
+                }
             }
         });
 
     private AudioSnapshot TakeSnapshotLocked()
     {
-        var outs = Outputs();
-        var ins = Inputs();
-        var dOut = _audio.DefaultPlaybackDevice;
-        var dCommOut = _audio.DefaultPlaybackCommunicationsDevice;
-        var dIn = _audio.DefaultCaptureDevice;
-        EnsureCaptureMuteSubscriptionLocked(dIn);
+        var outs = EnumerateEndpointsLocked(DataFlow.Render);
+        var ins = EnumerateEndpointsLocked(DataFlow.Capture);
+        using var dOut = TryGetDefaultEndpoint(DataFlow.Render, Role.Multimedia);
+        using var dCommOut = TryGetDefaultEndpoint(DataFlow.Render, Role.Communications);
+        using var dIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
 
-        return new AudioSnapshot(
-            outs.Select(d => d.Id).ToHashSet(),
-            ins.Select(d => d.Id).ToHashSet(),
-            outs.ToDictionary(d => d.Id, d => d.FullName),
-            ins.ToDictionary(d => d.Id, d => d.FullName),
-            dOut?.Id,
-            dIn?.Id,
-            dOut?.FullName,
-            dIn?.FullName,
-            dIn?.IsMuted ?? false,
-            dCommOut?.Id,
-            dCommOut?.FullName);
+        try
+        {
+            string? dOutRaw = SafeGetRawId(dOut);
+            string? dCommRaw = SafeGetRawId(dCommOut);
+            string? dInRaw = SafeGetRawId(dIn);
+
+            EnsureCaptureMuteSubscriptionLocked(dInRaw);
+
+            bool micMuted = false;
+            if (dIn != null)
+            {
+                try
+                {
+                    micMuted = dIn.AudioEndpointVolume.Mute;
+                    _watchedCaptureMuted = micMuted;
+                }
+                catch { }
+            }
+
+            Guid? defOutId = dOutRaw != null ? ProfileLogic.ParseEndpointGuid(dOutRaw) : null;
+            Guid? defCommId = dCommRaw != null ? ProfileLogic.ParseEndpointGuid(dCommRaw) : null;
+            Guid? defInId = dInRaw != null ? ProfileLogic.ParseEndpointGuid(dInRaw) : null;
+
+            var outIds = new HashSet<Guid>(outs.Count);
+            var outNames = new Dictionary<Guid, string>(outs.Count);
+            foreach (var o in outs)
+            {
+                outIds.Add(o.Id);
+                outNames[o.Id] = o.FullName;
+            }
+
+            var inIds = new HashSet<Guid>(ins.Count);
+            var inNames = new Dictionary<Guid, string>(ins.Count);
+            foreach (var i in ins)
+            {
+                inIds.Add(i.Id);
+                inNames[i.Id] = i.FullName;
+            }
+
+            return new AudioSnapshot(
+                outIds,
+                inIds,
+                outNames,
+                inNames,
+                defOutId,
+                defInId,
+                SafeGetFriendlyName(dOut),
+                SafeGetFriendlyName(dIn),
+                micMuted,
+                defCommId,
+                SafeGetFriendlyName(dCommOut));
+        }
+        finally
+        {
+            DisposeEntries(outs);
+            DisposeEntries(ins);
+        }
     }
 
     public Task<AudioSnapshot?> SnapshotAsync() =>
@@ -161,28 +322,40 @@ public sealed class AudioService : IDisposable
             }
         });
 
-    private static void SetDefault(CoreAudioDevice d, bool includeComm = true)
+    private void SetDefaultLocked(DataFlow flow, string rawEndpointId, bool includeComm = true)
     {
-        if (!d.IsDefaultDevice) d.SetAsDefault();
-        if (includeComm && !d.IsDefaultCommunicationsDevice) d.SetAsDefaultCommunications();
+        string? curMultimedia = TryGetDefaultRawId(flow, Role.Multimedia);
+        string? curConsole = TryGetDefaultRawId(flow, Role.Console);
+
+        if (!string.Equals(curConsole, rawEndpointId, StringComparison.OrdinalIgnoreCase))
+            PolicyConfigClient.SetDefaultEndpoint(rawEndpointId, Role.Console);
+
+        if (!string.Equals(curMultimedia, rawEndpointId, StringComparison.OrdinalIgnoreCase))
+            PolicyConfigClient.SetDefaultEndpoint(rawEndpointId, Role.Multimedia);
+
+        if (includeComm)
+            SetDefaultCommOnlyLocked(flow, rawEndpointId);
     }
 
-    private static void SetDefaultCommOnly(CoreAudioDevice d)
+    private void SetDefaultCommOnlyLocked(DataFlow flow, string rawEndpointId)
     {
-        if (!d.IsDefaultCommunicationsDevice) d.SetAsDefaultCommunications();
+        string? curComm = TryGetDefaultRawId(flow, Role.Communications);
+        if (!string.Equals(curComm, rawEndpointId, StringComparison.OrdinalIgnoreCase))
+            PolicyConfigClient.SetDefaultEndpoint(rawEndpointId, Role.Communications);
     }
 
-    private static void ApplyVolumeIfNeeded(CoreAudioDevice d, int? targetVolume)
+    private static void ApplyVolumeIfNeeded(MMDevice d, int? targetVolume)
     {
         if (!targetVolume.HasValue) return;
-        int clamped = Math.Clamp(targetVolume.Value, 0, 100);
-        if (Math.Abs(d.Volume - clamped) >= 0.5)
+        float targetScalar = Math.Clamp(targetVolume.Value, 0, 100) / 100f;
+        float currentScalar = d.AudioEndpointVolume.MasterVolumeLevelScalar;
+        if (Math.Abs(currentScalar - targetScalar) >= 0.005f)
         {
-            d.Volume = clamped;
+            d.AudioEndpointVolume.MasterVolumeLevelScalar = targetScalar;
         }
     }
 
-    private static CoreAudioDevice? FindDevice(List<CoreAudioDevice> list, Guid id, string? savedName, out bool matchedByName)
+    private static EndpointEntry? FindDevice(List<EndpointEntry> list, Guid id, string? savedName, out bool matchedByName)
     {
         matchedByName = false;
         var exact = list.FirstOrDefault(x => x.Id == id);
@@ -221,64 +394,86 @@ public sealed class AudioService : IDisposable
                 Guid? resolvedCommOut = null;
                 Guid? resolvedIn = null;
 
-                List<CoreAudioDevice>? cachedOuts = (outputId.HasValue || commOutputId.HasValue) ? Outputs() : null;
-                bool hasSeparateComm = commOutputId.HasValue;
+                List<EndpointEntry>? outs = (outputId.HasValue || commOutputId.HasValue)
+                    ? EnumerateEndpointsLocked(DataFlow.Render)
+                    : null;
+                List<EndpointEntry>? ins = inputId.HasValue
+                    ? EnumerateEndpointsLocked(DataFlow.Capture)
+                    : null;
 
-                if (outputId.HasValue)
+                try
                 {
-                    var d = FindDevice(cachedOuts!, outputId.Value, outputName, out bool byName);
-                    if (d == null)
-                    {
-                        problems.Add("output not connected");
-                    }
-                    else
-                    {
-                        SetDefault(d, includeComm: !hasSeparateComm);
-                        ApplyVolumeIfNeeded(d, outputVolume);
-                        any = true;
-                        if (byName) resolvedOut = d.Id;
-                    }
-                }
-                else if (outputVolume.HasValue && _audio.DefaultPlaybackDevice is { } curOut)
-                {
-                    ApplyVolumeIfNeeded(curOut, outputVolume);
-                    any = true;
-                }
+                    bool hasSeparateComm = commOutputId.HasValue;
 
-                if (commOutputId.HasValue)
-                {
-                    var comm = FindDevice(cachedOuts!, commOutputId.Value, commOutputName, out bool byName);
-                    if (comm == null)
+                    if (outputId.HasValue)
                     {
-                        problems.Add("comm output not connected");
+                        var d = FindDevice(outs!, outputId.Value, outputName, out bool byName);
+                        if (d == null)
+                        {
+                            problems.Add("output not connected");
+                        }
+                        else
+                        {
+                            SetDefaultLocked(DataFlow.Render, d.RawId, includeComm: !hasSeparateComm);
+                            ApplyVolumeIfNeeded(d.Device, outputVolume);
+                            any = true;
+                            if (byName) resolvedOut = d.Id;
+                        }
                     }
-                    else
+                    else if (outputVolume.HasValue)
                     {
-                        SetDefaultCommOnly(comm);
-                        any = true;
-                        if (byName) resolvedCommOut = comm.Id;
+                        using var curOut = TryGetDefaultEndpoint(DataFlow.Render, Role.Multimedia);
+                        if (curOut != null)
+                        {
+                            ApplyVolumeIfNeeded(curOut, outputVolume);
+                            any = true;
+                        }
                     }
-                }
 
-                if (inputId.HasValue)
-                {
-                    var d = FindDevice(Inputs(), inputId.Value, inputName, out bool byName);
-                    if (d == null)
+                    if (commOutputId.HasValue)
                     {
-                        problems.Add("input not connected");
+                        var comm = FindDevice(outs!, commOutputId.Value, commOutputName, out bool byName);
+                        if (comm == null)
+                        {
+                            problems.Add("comm output not connected");
+                        }
+                        else
+                        {
+                            SetDefaultCommOnlyLocked(DataFlow.Render, comm.RawId);
+                            any = true;
+                            if (byName) resolvedCommOut = comm.Id;
+                        }
                     }
-                    else
+
+                    if (inputId.HasValue)
                     {
-                        SetDefault(d, includeComm: true);
-                        ApplyVolumeIfNeeded(d, inputVolume);
-                        any = true;
-                        if (byName) resolvedIn = d.Id;
+                        var d = FindDevice(ins!, inputId.Value, inputName, out bool byName);
+                        if (d == null)
+                        {
+                            problems.Add("input not connected");
+                        }
+                        else
+                        {
+                            SetDefaultLocked(DataFlow.Capture, d.RawId, includeComm: true);
+                            ApplyVolumeIfNeeded(d.Device, inputVolume);
+                            any = true;
+                            if (byName) resolvedIn = d.Id;
+                        }
+                    }
+                    else if (inputVolume.HasValue)
+                    {
+                        using var curIn = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
+                        if (curIn != null)
+                        {
+                            ApplyVolumeIfNeeded(curIn, inputVolume);
+                            any = true;
+                        }
                     }
                 }
-                else if (inputVolume.HasValue && _audio.DefaultCaptureDevice is { } curIn)
+                finally
                 {
-                    ApplyVolumeIfNeeded(curIn, inputVolume);
-                    any = true;
+                    DisposeEntries(outs);
+                    DisposeEntries(ins);
                 }
 
                 var snap = any ? TakeSnapshotLocked() : null;
@@ -298,9 +493,9 @@ public sealed class AudioService : IDisposable
             lock (_lock)
             {
                 if (_disposed) return new CycleResult(null, null);
-                var next = Cycle(Outputs(), _audio.DefaultPlaybackDevice, filter);
+                var next = CycleLocked(DataFlow.Render, filter);
                 if (next == null) return new CycleResult(null, null);
-                return new CycleResult(new DeviceItem(next.Id, next.FullName), TakeSnapshotLocked());
+                return new CycleResult(next, TakeSnapshotLocked());
             }
         });
 
@@ -310,24 +505,32 @@ public sealed class AudioService : IDisposable
             lock (_lock)
             {
                 if (_disposed) return new CycleResult(null, null);
-                var next = Cycle(Inputs(), _audio.DefaultCaptureDevice, filter);
+                var next = CycleLocked(DataFlow.Capture, filter);
                 if (next == null) return new CycleResult(null, null);
-                return new CycleResult(new DeviceItem(next.Id, next.FullName), TakeSnapshotLocked());
+                return new CycleResult(next, TakeSnapshotLocked());
             }
         });
 
-    private static CoreAudioDevice? Cycle(
-        List<CoreAudioDevice> all,
-        CoreAudioDevice? current,
-        IReadOnlyCollection<CycleDeviceEntry> filter)
+    private DeviceItem? CycleLocked(DataFlow flow, IReadOnlyCollection<CycleDeviceEntry> filter)
     {
-        var pairs = all.Select(d => (d.Id, d.FullName)).ToList();
-        int nextIdx = ProfileLogic.SelectNextCycleIndex(pairs, current?.Id, filter);
-        if (nextIdx < 0) return null;
+        var all = EnumerateEndpointsLocked(flow);
+        try
+        {
+            string? curRaw = TryGetDefaultRawId(flow, Role.Multimedia);
+            Guid? curId = curRaw != null ? ProfileLogic.ParseEndpointGuid(curRaw) : null;
+            var pairs = all.Select(d => (d.Id, d.FullName)).ToList();
 
-        var next = all[nextIdx];
-        SetDefault(next, includeComm: true);
-        return next;
+            int nextIdx = ProfileLogic.SelectNextCycleIndex(pairs, curId, filter);
+            if (nextIdx < 0) return null;
+
+            var chosen = all[nextIdx];
+            SetDefaultLocked(flow, chosen.RawId, includeComm: true);
+            return new DeviceItem(chosen.Id, chosen.FullName);
+        }
+        finally
+        {
+            DisposeEntries(all);
+        }
     }
 
     /// <summary>Toggles default microphone mute and returns the new state alongside a fresh snapshot.</summary>
@@ -337,10 +540,11 @@ public sealed class AudioService : IDisposable
             lock (_lock)
             {
                 if (_disposed) return new MuteToggleResult(null, null);
-                var mic = _audio.DefaultCaptureDevice;
+                using var mic = TryGetDefaultEndpoint(DataFlow.Capture, Role.Multimedia);
                 if (mic == null) return new MuteToggleResult(null, null);
-                bool nowMuted = !mic.IsMuted;
-                mic.Mute(nowMuted);
+                bool nowMuted = !mic.AudioEndpointVolume.Mute;
+                mic.AudioEndpointVolume.Mute = nowMuted;
+                _watchedCaptureMuted = nowMuted;
                 return new MuteToggleResult(nowMuted, TakeSnapshotLocked());
             }
         });
@@ -351,19 +555,118 @@ public sealed class AudioService : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            try { _captureMuteSub?.Dispose(); } catch { }
-            try { _controllerSub?.Dispose(); } catch { }
-            _captureMuteSub = null;
-            _controllerSub = null;
-            _audio.Dispose();
+            ReleaseCaptureWatchLocked();
+            if (_notifRegistered)
+            {
+                try { _enumerator.UnregisterEndpointNotificationCallback(_notifClient); } catch { }
+                _notifRegistered = false;
+            }
+            try { _enumerator.Dispose(); } catch { }
         }
     }
 
-    private sealed class ActionObserver<T>(Action<T> onNext) : IObserver<T>
+    private sealed class NotificationClient(AudioService owner) : IMMNotificationClient
     {
-        public void OnNext(T value) => onNext(value);
-        public void OnError(Exception error) => AppLog.Error("CoreAudio observable error", error);
-        public void OnCompleted() { }
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) =>
+            owner.OnEndpointNotification(refreshCaptureWatch: flow == DataFlow.Capture);
+
+        public void OnDeviceAdded(string pwstrDeviceId) =>
+            owner.OnEndpointNotification(refreshCaptureWatch: true);
+
+        public void OnDeviceRemoved(string deviceId) =>
+            owner.OnEndpointNotification(refreshCaptureWatch: true);
+
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) =>
+            owner.OnEndpointNotification(refreshCaptureWatch: true);
+
+        public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
+    }
+}
+
+/// <summary>COM wrapper for Windows AudioSes PolicyConfigClient to switch default CoreAudio endpoints.</summary>
+internal static class PolicyConfigClient
+{
+    public static void SetDefaultEndpoint(string rawEndpointId, Role role)
+    {
+        object? comObj = null;
+        try
+        {
+            comObj = new PolicyConfigCoclass();
+            int hr = comObj switch
+            {
+                IPolicyConfig pc => pc.SetDefaultEndpoint(rawEndpointId, (uint)role),
+                IPolicyConfigVista pcv => pcv.SetDefaultEndpoint(rawEndpointId, (uint)role),
+                _ => unchecked((int)0x80004002) // E_NOINTERFACE
+            };
+            Marshal.ThrowExceptionForHR(hr);
+        }
+        finally
+        {
+            if (comObj != null && Marshal.IsComObject(comObj))
+                Marshal.ReleaseComObject(comObj);
+        }
+    }
+
+    [ComImport]
+    [Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    private class PolicyConfigCoclass { }
+
+    [ComImport]
+    [Guid("F8679F50-850A-41CF-9C72-430F290290C8")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPolicyConfig
+    {
+        [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, out IntPtr ppFormat);
+        [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, out IntPtr ppFormat);
+        [PreserveSig] int ResetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName);
+        [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pEndpointFormat, IntPtr mixFormat);
+        [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, IntPtr pmftDefaultPeriod, IntPtr pmftMinimumPeriod);
+        [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pmftPeriod);
+        [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, out int pMode);
+        [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, int mode);
+        [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, IntPtr key, IntPtr pv);
+        [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, IntPtr key, IntPtr pv);
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.U4)] uint role);
+        [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bVisible);
+    }
+
+    [ComImport]
+    [Guid("568B9108-44BF-40B4-9006-86AFE5B5A620")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPolicyConfigVista
+    {
+        [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, out IntPtr ppFormat);
+        [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, out IntPtr ppFormat);
+        [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pEndpointFormat, IntPtr mixFormat);
+        [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bDefault, IntPtr pmftDefaultPeriod, IntPtr pmftMinimumPeriod);
+        [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, IntPtr pmftPeriod);
+        [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, out int pMode);
+        [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, int mode);
+        [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, IntPtr key, IntPtr pv);
+        [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bFxStore, IntPtr key, IntPtr pv);
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.U4)] uint role);
+        [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, [MarshalAs(UnmanagedType.Bool)] bool bVisible);
+    }
+}
+
+internal static class UpdateService
+{
+    private static readonly HttpClient Http = CreateClient();
+
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AudioProfileSwitcher", AppInfo.Version));
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        return client;
+    }
+
+    public static async Task<ReleaseCheckResult> CheckForUpdatesAsync(CancellationToken ct = default)
+    {
+        using var resp = await Http.GetAsync(AppInfo.LatestReleaseApiUrl, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        return ProfileLogic.ParseLatestRelease(json, AppInfo.Version);
     }
 }
 
@@ -387,32 +690,29 @@ internal sealed class HotKeyService : NativeWindow, IDisposable
         CreateHandle(new CreateParams());
     }
 
-    /// <summary>
-    /// Registers hotkeys with Win32, skipping UnregisterHotKey/RegisterHotKey churn when the spec
-    /// is unchanged (unless <paramref name="force"/> is true, e.g. after power/session resume).
-    /// </summary>
     public List<string> RegisterAll(
         IReadOnlyList<(string Name, HotKeyBinding Binding, Action Action)> items,
         bool force = false)
     {
-        if (!force && _registeredSpec != null && _lastFailures.Count == 0 && SpecMatches(_registeredSpec, items))
+        var enabledItems = items.Where(x => x.Binding.IsEnabled).ToList();
+
+        if (!force && _registeredSpec != null && _lastFailures.Count == 0 && SpecMatches(_registeredSpec, enabledItems))
         {
             for (int i = 0; i < _slotIds.Count; i++)
             {
-                _actions[_slotIds[i]] = items[i].Action;
+                _actions[_slotIds[i]] = enabledItems[i].Action;
             }
             return _lastFailures;
         }
 
         UnregisterAll();
-        var spec = new List<(string Name, HotKeyModifiers Modifiers, Keys Key)>(items.Count);
+        var spec = new List<(string Name, HotKeyModifiers Modifiers, Keys Key)>(enabledItems.Count);
         var failures = new List<string>();
 
-        foreach (var (name, binding, action) in items)
+        foreach (var (name, binding, action) in enabledItems)
         {
             spec.Add((name, binding.Modifiers, binding.Key));
             int id = _nextId++;
-            // NoRepeat: holding the keys down must not spam-cycle devices.
             uint mods = (uint)(binding.Modifiers | HotKeyModifiers.NoRepeat);
             if (RegisterHotKey(Handle, id, mods, (uint)binding.Key))
             {
@@ -520,7 +820,7 @@ internal static class ChimePlayer
         {
             try
             {
-                await Task.Delay(120).ConfigureAwait(false); // let Windows finish routing the new default output
+                await Task.Delay(120).ConfigureAwait(false);
                 PlayNow(cue);
             }
             catch (Exception ex)
@@ -538,7 +838,7 @@ internal static class ChimePlayer
             {
                 if (Cues.TryGetValue(cue, out var loaded))
                 {
-                    loaded.Player.Play(); // non-blocking playback from preloaded WAV buffer
+                    loaded.Player.Play();
                 }
             }
             catch (Exception ex)

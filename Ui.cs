@@ -173,7 +173,6 @@ internal static class TrayIcons
                 g.DrawEllipse(ring, 18, 18, 13, 13);
             }
         }
-        // Static icons for the whole process lifetime: handles are intentionally kept.
         return Icon.FromHandle(bmp.GetHicon());
     }
 }
@@ -397,6 +396,263 @@ internal sealed class DarkSlider : Control
     }
 }
 
+/// <summary>Custom-painted dark checklist with rounded accent checkboxes, wheel scroll, and keyboard navigation.</summary>
+internal sealed class DarkCheckedList : Control
+{
+    private sealed class Entry(DeviceItem item, bool isChecked)
+    {
+        public DeviceItem Item { get; } = item;
+        public bool Checked { get; set; } = isChecked;
+    }
+
+    private readonly List<Entry> _entries = new();
+    private int _scrollOffset;
+    private int _hoverIndex = -1;
+    private int _focusIndex;
+
+    public DarkCheckedList()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.Selectable, true);
+        BackColor = Theme.BgCard;
+        ForeColor = Theme.TextPrimary;
+        Font = Theme.Body;
+        Cursor = Cursors.Hand;
+        TabStop = true;
+    }
+
+    private float ScaleFactor => Math.Max(1f, DeviceDpi / 96f);
+    private int RowHeight => (int)Math.Round(28 * ScaleFactor);
+
+    public void AddItem(DeviceItem item, bool isChecked)
+    {
+        _entries.Add(new Entry(item, isChecked));
+        Invalidate();
+    }
+
+    public void SetAllChecked(bool isChecked)
+    {
+        foreach (var e in _entries) e.Checked = isChecked;
+        Invalidate();
+    }
+
+    public List<DeviceItem> GetCheckedItems() =>
+        _entries.Where(e => e.Checked).Select(e => e.Item).ToList();
+
+    private int MaxScroll => Math.Max(0, _entries.Count * RowHeight - (Height - 4));
+
+    private void ClampScroll() => _scrollOffset = Math.Clamp(_scrollOffset, 0, MaxScroll);
+
+    private int IndexAtY(int y)
+    {
+        if (_entries.Count == 0 || y < 2 || y >= Height - 2) return -1;
+        int idx = (y - 2 + _scrollOffset) / RowHeight;
+        return idx >= 0 && idx < _entries.Count ? idx : -1;
+    }
+
+    private void EnsureVisible(int index)
+    {
+        if (index < 0 || index >= _entries.Count) return;
+        int top = index * RowHeight;
+        int bottom = top + RowHeight;
+        int viewH = Math.Max(RowHeight, Height - 4);
+        if (top < _scrollOffset) _scrollOffset = top;
+        else if (bottom > _scrollOffset + viewH) _scrollOffset = bottom - viewH;
+        ClampScroll();
+    }
+
+    protected override bool IsInputKey(Keys keyData) =>
+        keyData is Keys.Up or Keys.Down or Keys.Home or Keys.End || base.IsInputKey(keyData);
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        ClampScroll();
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        int idx = IndexAtY(e.Y);
+        if (idx != _hoverIndex)
+        {
+            _hoverIndex = idx;
+            Invalidate();
+        }
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverIndex = -1;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        Focus();
+        int idx = IndexAtY(e.Y);
+        if (idx >= 0)
+        {
+            _focusIndex = idx;
+            _entries[idx].Checked = !_entries[idx].Checked;
+            Invalidate();
+        }
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (MaxScroll <= 0) return;
+        _scrollOffset -= Math.Sign(e.Delta) * RowHeight;
+        ClampScroll();
+        Invalidate();
+    }
+
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (_entries.Count == 0) return;
+
+        switch (e.KeyCode)
+        {
+            case Keys.Up:
+                _focusIndex = Math.Max(0, _focusIndex - 1);
+                EnsureVisible(_focusIndex);
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Down:
+                _focusIndex = Math.Min(_entries.Count - 1, _focusIndex + 1);
+                EnsureVisible(_focusIndex);
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Home:
+                _focusIndex = 0;
+                EnsureVisible(_focusIndex);
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.End:
+                _focusIndex = _entries.Count - 1;
+                EnsureVisible(_focusIndex);
+                Invalidate();
+                e.Handled = true;
+                break;
+            case Keys.Space:
+                if (_focusIndex >= 0 && _focusIndex < _entries.Count)
+                {
+                    _entries[_focusIndex].Checked = !_entries[_focusIndex].Checked;
+                    Invalidate();
+                }
+                e.Handled = true;
+                break;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+
+        float k = ScaleFactor;
+        var outer = new Rectangle(0, 0, Width - 1, Height - 1);
+        using var outerPath = Gfx.RoundRect(outer, (int)Math.Round(6 * k));
+        using (var bg = new SolidBrush(Theme.BgCard)) g.FillPath(bg, outerPath);
+
+        var clipState = g.Save();
+        g.SetClip(new Rectangle(2, 2, Width - 4, Height - 4));
+
+        if (_entries.Count == 0)
+        {
+            TextRenderer.DrawText(g, "No devices available", Theme.Small,
+                new Rectangle(8, 2, Width - 16, Height - 4), Theme.TextMuted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+        else
+        {
+            int rowH = RowHeight;
+            int boxSize = (int)Math.Round(15 * k);
+            int padLeft = (int)Math.Round(10 * k);
+            int scrollBarSpace = MaxScroll > 0 ? (int)Math.Round(8 * k) : 0;
+
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                int y = 2 + i * rowH - _scrollOffset;
+                if (y + rowH < 2 || y > Height - 2) continue;
+
+                var rowRect = new Rectangle(3, y, Width - 6 - scrollBarSpace, rowH);
+                if (i == _hoverIndex || (Focused && i == _focusIndex))
+                {
+                    using var hPath = Gfx.RoundRect(rowRect, (int)Math.Round(4 * k));
+                    using var hb = new SolidBrush(Theme.BgCardHover);
+                    g.FillPath(hb, hPath);
+                }
+
+                var entry = _entries[i];
+                var boxRect = new Rectangle(padLeft, y + (rowH - boxSize) / 2, boxSize, boxSize);
+                using (var boxPath = Gfx.RoundRect(boxRect, (int)Math.Round(4 * k)))
+                {
+                    if (entry.Checked)
+                    {
+                        using var fill = new SolidBrush(Theme.Accent);
+                        g.FillPath(fill, boxPath);
+                        using var checkPen = new Pen(Color.White, Math.Max(1.6f, 1.6f * k))
+                        {
+                            StartCap = LineCap.Round,
+                            EndCap = LineCap.Round,
+                            LineJoin = LineJoin.Round
+                        };
+                        var p1 = new PointF(boxRect.X + boxSize * 0.24f, boxRect.Y + boxSize * 0.52f);
+                        var p2 = new PointF(boxRect.X + boxSize * 0.44f, boxRect.Y + boxSize * 0.72f);
+                        var p3 = new PointF(boxRect.X + boxSize * 0.78f, boxRect.Y + boxSize * 0.30f);
+                        g.DrawLines(checkPen, new[] { p1, p2, p3 });
+                    }
+                    else
+                    {
+                        using var pen = new Pen(Theme.BgBorder, 1.2f);
+                        g.DrawPath(pen, boxPath);
+                    }
+                }
+
+                int textX = boxRect.Right + (int)Math.Round(9 * k);
+                var textRect = new Rectangle(textX, y, Math.Max(20, rowRect.Right - textX - 6), rowH);
+                var textColor = !entry.Item.Connected
+                    ? Theme.Warning
+                    : (entry.Checked ? Theme.TextPrimary : Theme.TextSoft);
+                TextRenderer.DrawText(g, entry.Item.ToString(), Font, textRect, textColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            }
+
+            if (MaxScroll > 0)
+            {
+                int viewH = Height - 8;
+                int totalH = _entries.Count * rowH;
+                int thumbH = Math.Max((int)Math.Round(18 * k), (int)Math.Round(viewH * (viewH / (double)totalH)));
+                int thumbY = 4 + (int)Math.Round((viewH - thumbH) * (_scrollOffset / (double)MaxScroll));
+                var thumbRect = new Rectangle(Width - (int)Math.Round(6 * k), thumbY, (int)Math.Round(3 * k), thumbH);
+                using var sb = new SolidBrush(Theme.BgBorder);
+                using var sp = Gfx.RoundRect(thumbRect, 2);
+                g.FillPath(sb, sp);
+            }
+        }
+
+        g.Restore(clipState);
+
+        using var borderPen = new Pen(Focused ? Theme.Accent : Theme.BgBorder, 1);
+        g.DrawPath(borderPen, outerPath);
+    }
+}
+
 /// <summary>Owner-drawn combo so the drop-down actually follows the dark theme.</summary>
 internal sealed class DarkCombo : ComboBox
 {
@@ -555,8 +811,6 @@ internal sealed class CardControl : Control
         Invalidate();
     }
 
-    // ---- input ----------------------------------------------------------------------------
-
     protected override bool IsInputKey(Keys keyData) => keyData is Keys.Up or Keys.Down || base.IsInputKey(keyData);
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -582,7 +836,6 @@ internal sealed class CardControl : Control
 
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { _keyboardFocus = false; Invalidate(); base.OnLostFocus(e); }
-
     protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
 
     protected override void OnMouseLeave(EventArgs e)
@@ -638,8 +891,6 @@ internal sealed class CardControl : Control
         else if (ButtonsVisible && DelRect().Contains(e.Location)) HandleDelete();
         else ActivateRequested?.Invoke(Card);
     }
-
-    // ---- painting -------------------------------------------------------------------------
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -766,19 +1017,31 @@ internal sealed class CardControl : Control
     }
 }
 
-/// <summary>Always-on-top, click-through, never-activating PerMonitorV2-aware overlay window.</summary>
+/// <summary>Always-on-top, never-activating PerMonitorV2-aware overlay window (click-through by default).</summary>
 internal abstract class OverlayForm : Form
 {
     private readonly List<Font> _ownedFonts = new();
+    private bool _clickThrough = true;
 
     protected OverlayForm()
     {
-        AutoScaleMode = AutoScaleMode.None; // sizes & pixel fonts are scaled explicitly from DeviceDpi
+        AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         DoubleBuffered = true;
+    }
+
+    protected bool ClickThrough
+    {
+        get => _clickThrough;
+        set
+        {
+            if (_clickThrough == value) return;
+            _clickThrough = value;
+            if (IsHandleCreated) UpdateStyles();
+        }
     }
 
     protected float Dpi => Math.Max(0.5f, DeviceDpi / 96f);
@@ -833,7 +1096,8 @@ internal abstract class OverlayForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000020 | 0x00000008; // NOACTIVATE | TOOLWINDOW | TRANSPARENT | TOPMOST
+            cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; // NOACTIVATE | TOOLWINDOW | TOPMOST
+            if (_clickThrough) cp.ExStyle |= 0x00000020; // WS_EX_TRANSPARENT
             return cp;
         }
     }
@@ -868,8 +1132,6 @@ internal sealed class OsdBannerForm : OverlayForm
 
     protected override void ApplyDpiLayout()
     {
-        var oldFonts = _catLbl.Font; // keep valid font assigned before clearing
-        _ = oldFonts;
         var catFont = new Font("Segoe UI", Math.Max(8f, 7.5f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
         var msgFont = new Font("Segoe UI", Math.Max(10f, 10f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
 
@@ -933,7 +1195,17 @@ internal sealed class MuteBannerForm : OverlayForm
 {
     private readonly Label _label;
     private MuteBannerPosition _position = MuteBannerPosition.TopCenter;
+    private int? _customX;
+    private int? _customY;
     private Rectangle? _targetArea;
+    private bool _mouseDown;
+    private bool _dragged;
+    private bool _hover;
+    private Point _dragStartScreen;
+    private Point _formStartLocation;
+
+    public event Action<Point>? BannerMoved;
+    public event Action? UnmuteRequested;
 
     public MuteBannerForm()
     {
@@ -947,8 +1219,84 @@ internal sealed class MuteBannerForm : OverlayForm
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter
         };
+        _label.MouseEnter += (_, _) => { if (Interactive) { _hover = true; Invalidate(); } };
+        _label.MouseLeave += (_, _) => { if (_hover) { _hover = false; Invalidate(); } };
+        _label.MouseDown += OnInteractiveMouseDown;
+        _label.MouseMove += OnInteractiveMouseMove;
+        _label.MouseUp += OnInteractiveMouseUp;
+
         Controls.Add(_label);
         ApplyDpiLayout();
+    }
+
+    public bool Interactive
+    {
+        get => !ClickThrough;
+        set
+        {
+            ClickThrough = !value;
+            _label.Cursor = value ? Cursors.Hand : Cursors.Default;
+            Invalidate();
+        }
+    }
+
+    private void OnInteractiveMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (!Interactive || e.Button != MouseButtons.Left) return;
+        _mouseDown = true;
+        _dragged = false;
+        _dragStartScreen = Cursor.Position;
+        _formStartLocation = Location;
+        _label.Capture = true;
+    }
+
+    private void OnInteractiveMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_mouseDown || !Interactive) return;
+        var cur = Cursor.Position;
+        int dx = cur.X - _dragStartScreen.X;
+        int dy = cur.Y - _dragStartScreen.Y;
+
+        if (!_dragged && (Math.Abs(dx) > 4 || Math.Abs(dy) > 4))
+        {
+            _dragged = true;
+            _label.Cursor = Cursors.SizeAll;
+        }
+
+        if (_dragged)
+        {
+            var next = new Point(_formStartLocation.X + dx, _formStartLocation.Y + dy);
+            Screen? scr = null;
+            try { scr = Screen.FromPoint(cur); } catch { }
+            if (TryGetWorkingArea(scr) is { } area)
+            {
+                next = new Point(
+                    Math.Clamp(next.X, area.Left, Math.Max(area.Left, area.Right - Width)),
+                    Math.Clamp(next.Y, area.Top, Math.Max(area.Top, area.Bottom - Height)));
+                _targetArea = area;
+            }
+            Location = next;
+        }
+    }
+
+    private void OnInteractiveMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (!_mouseDown || e.Button != MouseButtons.Left) return;
+        _mouseDown = false;
+        _label.Capture = false;
+        _label.Cursor = Interactive ? Cursors.Hand : Cursors.Default;
+
+        if (_dragged)
+        {
+            _position = MuteBannerPosition.Custom;
+            _customX = Location.X;
+            _customY = Location.Y;
+            BannerMoved?.Invoke(Location);
+        }
+        else if (Interactive && ClientRectangle.Contains(PointToClient(Cursor.Position)))
+        {
+            UnmuteRequested?.Invoke();
+        }
     }
 
     protected override void ApplyDpiLayout()
@@ -960,33 +1308,40 @@ internal sealed class MuteBannerForm : OverlayForm
         tempFont.Dispose();
 
         Size = new Size(Px(128), Px(30));
-        if (_targetArea is { } area)
+        if (_targetArea is { } area && !_dragged)
         {
-            Location = ProfileLogic.ComputeMuteBannerLocation(area, Size, _position, Dpi);
+            Location = ProfileLogic.ComputeMuteBannerLocation(area, Size, _position, Dpi, _customX, _customY);
         }
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        using var border = new Pen(Theme.Danger, 1);
+        var borderColor = Interactive && _hover ? Color.FromArgb(255, 130, 132) : Theme.Danger;
+        using var border = new Pen(borderColor, 1);
         e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
     }
 
-    public void ShowBanner(MuteBannerPosition position = MuteBannerPosition.TopCenter)
+    public void ShowBanner(MuteBannerPosition position = MuteBannerPosition.TopCenter, int? customX = null, int? customY = null)
     {
         Screen? preferred = null;
         if (position == MuteBannerPosition.ActiveScreenTop)
         {
             try { preferred = Screen.FromPoint(Cursor.Position); } catch { }
         }
+        else if (position == MuteBannerPosition.Custom && customX.HasValue && customY.HasValue)
+        {
+            try { preferred = Screen.FromPoint(new Point(customX.Value, customY.Value)); } catch { }
+        }
 
         var area = TryGetWorkingArea(preferred);
         if (area == null) return;
 
         _position = position;
+        _customX = customX;
+        _customY = customY;
         _targetArea = area.Value;
-        Location = ProfileLogic.ComputeMuteBannerLocation(area.Value, Size, position, Dpi);
+        Location = ProfileLogic.ComputeMuteBannerLocation(area.Value, Size, position, Dpi, customX, customY);
         ApplyDpiLayout();
         Invalidate();
         if (!Visible) Show();
