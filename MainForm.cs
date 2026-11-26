@@ -36,6 +36,7 @@ public sealed class MainForm : Form
     private Label _jumpLabel = null!;
     private DarkCombo _fallbackCombo = null!;
     private DarkCombo _muteBannerPosCombo = null!;
+    private Button _checkUpdateBtn = null!;
 
     // Auto-activate debounce & flapping guard
     private readonly HashSet<Guid> _pendingNewDevices = new();
@@ -44,6 +45,9 @@ public sealed class MainForm : Form
     private bool _settingsOpen;
     private bool _updatingFallbackCombo;
     private bool _updatingBannerPosCombo;
+    private bool _resizingHeight;
+    private int _resizeStartScreenY;
+    private int _resizeStartHeight;
     private HotKeyTarget? _capturing;
     private AudioSnapshot? _snap;
     private bool _micMuted;
@@ -73,20 +77,21 @@ public sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "AudioSwitcher";
         Icon = TrayIcons.AppWindow;
-        Size = new Size(380, 620);
-        MinimumSize = new Size(380, 620);
+        MinimumSize = new Size(380, 420);
+        MaximumSize = new Size(380, 1400);
+        Size = new Size(380, ProfileLogic.ClampWindowHeight(_config.WindowHeight, 420, 1400, 620));
         FormBorderStyle = FormBorderStyle.None;
         RestoreWindowLocation();
         BackColor = Theme.BgMain;
         ForeColor = Theme.TextPrimary;
-        Padding = new Padding(1); // room for the painted border
+        Padding = new Padding(1);
         DoubleBuffered = true;
 
         // ---- title bar ----
         var titleBar = new Panel { Dock = DockStyle.Top, Height = 44, BackColor = Theme.BgMain };
         var titleLbl = new Label
         {
-            Text = "AUDIO SWITCHER",
+            Text = $"AUDIO SWITCHER  v{AppInfo.Version}",
             Font = Theme.Header,
             ForeColor = Theme.TextMuted,
             Dock = DockStyle.Fill,
@@ -97,7 +102,7 @@ public sealed class MainForm : Form
         {
             if (e.Button != MouseButtons.Left) return;
             Native.DragWindow(Handle);
-            CaptureWindowLocation(persist: true);
+            CaptureWindowBounds(persist: true);
         };
         titleBar.MouseDown += drag;
         titleLbl.MouseDown += drag;
@@ -202,26 +207,72 @@ public sealed class MainForm : Form
         content.Controls.Add(_emptyPanel);
         content.Controls.Add(_settingsPanel);
 
-        // ---- status bar ----
-        _statusLabel = new Label
+        // ---- status bar + vertical resize grip ----
+        var footerBar = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 26,
+            Height = 28,
+            BackColor = Theme.BgCard
+        };
+
+        var resizeGrip = new Label
+        {
+            Text = "⋯",
+            Font = Theme.BodyBold,
+            ForeColor = Theme.TextMuted,
+            BackColor = Theme.BgCard,
+            Dock = DockStyle.Right,
+            Width = 28,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Cursor = Cursors.SizeNS
+        };
+        _tip.SetToolTip(resizeGrip, "Drag up or down to resize window height");
+        AttachVerticalResize(resizeGrip);
+
+        _statusLabel = new Label
+        {
+            Dock = DockStyle.Fill,
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
             BackColor = Theme.BgCard,
             TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(16, 0, 16, 0),
+            Padding = new Padding(16, 0, 4, 0),
             AutoEllipsis = true,
             Text = "Ready"
         };
         _statusTimer.Tick += (_, _) => { _statusTimer.Stop(); _statusLabel.Text = "Ready"; _statusLabel.ForeColor = Theme.TextMuted; };
 
+        var bottomResizeStrip = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 4,
+            BackColor = Theme.BgCard,
+            Cursor = Cursors.SizeNS
+        };
+        AttachVerticalResize(bottomResizeStrip);
+
+        footerBar.Controls.Add(_statusLabel);
+        footerBar.Controls.Add(resizeGrip);
+        footerBar.Controls.Add(bottomResizeStrip);
+
         Controls.Add(content);
-        Controls.Add(_statusLabel);
+        Controls.Add(footerBar);
         Controls.Add(actionBar);
         Controls.Add(nowPanel);
         Controls.Add(titleBar);
+
+        // ---- mute banner interactive wiring ----
+        _muteBanner.Interactive = _config.MuteBannerInteractive;
+        _muteBanner.BannerMoved += pt =>
+        {
+            _config.MuteBannerPosition = MuteBannerPosition.Custom;
+            _config.MuteBannerX = pt.X;
+            _config.MuteBannerY = pt.Y;
+            Save();
+            RefreshMuteBannerPosCombo();
+            SetStatus("Saved custom mute banner position", false);
+        };
+        _muteBanner.UnmuteRequested += () => _ = ToggleMicMuteAsync();
 
         // ---- dark tray menu ----
         _trayMenu.Renderer = new DarkMenuRenderer();
@@ -237,7 +288,7 @@ public sealed class MainForm : Form
             Visible = true,
             ContextMenuStrip = _trayMenu
         };
-        _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowFromTray(); };
+        _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ToggleWindowVisibility(); };
 
         // ---- timers, CoreAudio events & system events ----
         _eventCoalesceTimer.Tick += (_, _) =>
@@ -269,8 +320,42 @@ public sealed class MainForm : Form
     }
 
     // =========================================================================================
-    // Window plumbing, saved coordinates & power/session recovery
+    // Window plumbing, vertical resize, saved bounds & power/session recovery
     // =========================================================================================
+
+    private void AttachVerticalResize(Control handle)
+    {
+        handle.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            _resizingHeight = true;
+            _resizeStartScreenY = Cursor.Position.Y;
+            _resizeStartHeight = Height;
+            handle.Capture = true;
+        };
+        handle.MouseMove += (_, _) =>
+        {
+            if (!_resizingHeight) return;
+            int dy = Cursor.Position.Y - _resizeStartScreenY;
+            int maxH = 1400;
+            try
+            {
+                var scr = Screen.FromControl(this);
+                maxH = Math.Max(MinimumSize.Height, scr.WorkingArea.Bottom - Top);
+            }
+            catch { }
+
+            int nextH = Math.Clamp(_resizeStartHeight + dy, MinimumSize.Height, Math.Min(MaximumSize.Height, maxH));
+            if (Height != nextH) Height = nextH;
+        };
+        handle.MouseUp += (_, e) =>
+        {
+            if (!_resizingHeight || e.Button != MouseButtons.Left) return;
+            _resizingHeight = false;
+            handle.Capture = false;
+            CaptureWindowBounds(persist: true);
+        };
+    }
 
     private void RestoreWindowLocation()
     {
@@ -301,19 +386,24 @@ public sealed class MainForm : Form
         }
     }
 
-    private void CaptureWindowLocation(bool persist)
+    private void CaptureWindowBounds(bool persist)
     {
         if (WindowState != FormWindowState.Normal || !IsHandleCreated) return;
-        if (_config.WindowX == Location.X && _config.WindowY == Location.Y) return;
+        bool changed = _config.WindowX != Location.X ||
+                       _config.WindowY != Location.Y ||
+                       _config.WindowHeight != Height;
+        if (!changed) return;
+
         _config.WindowX = Location.X;
         _config.WindowY = Location.Y;
+        _config.WindowHeight = Height;
         if (persist) Save();
     }
 
     protected override void OnResizeEnd(EventArgs e)
     {
         base.OnResizeEnd(e);
-        CaptureWindowLocation(persist: true);
+        CaptureWindowBounds(persist: true);
     }
 
     private void OnCoreAudioStateChanged()
@@ -391,7 +481,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        CaptureWindowLocation(persist: true);
+        CaptureWindowBounds(persist: true);
 
         _audio.StateChanged -= OnCoreAudioStateChanged;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
@@ -418,9 +508,17 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
+    private void ToggleWindowVisibility()
+    {
+        if (Visible && WindowState != FormWindowState.Minimized && ContainsFocus)
+            HideToTray();
+        else
+            ShowFromTray();
+    }
+
     private void HideToTray()
     {
-        CaptureWindowLocation(persist: true);
+        CaptureWindowBounds(persist: true);
         Hide();
         if (!_config.TrayHintShown)
         {
@@ -435,6 +533,7 @@ public sealed class MainForm : Form
     {
         Show();
         WindowState = FormWindowState.Normal;
+        if (IsHandleCreated) Native.BringToFrontNative(Handle);
         Activate();
     }
 
@@ -568,6 +667,7 @@ public sealed class MainForm : Form
         AddHotKeyRow(t, "Cycle Output", HotKeyTarget.Output);
         AddHotKeyRow(t, "Cycle Input", HotKeyTarget.Input);
         AddHotKeyRow(t, "Toggle Mic Mute", HotKeyTarget.Mute);
+        AddHotKeyRow(t, "Show / Hide Window", HotKeyTarget.ToggleWindow);
 
         _jumpLabel = MakeRowLabel("", 36);
         t.Controls.Add(_jumpLabel);
@@ -607,12 +707,22 @@ public sealed class MainForm : Form
             ApplyMuteUi(_micMuted);
         }));
 
+        t.Controls.Add(MakeRowLabel("Interactive banner (drag / click to unmute)", 32));
+        t.Controls.Add(NewToggle(_config.MuteBannerInteractive, on =>
+        {
+            _config.MuteBannerInteractive = on;
+            _muteBanner.Interactive = on;
+            Save();
+            ApplyMuteUi(_micMuted);
+        }));
+
         t.Controls.Add(MakeRowLabel("Mute banner position", 34));
         _muteBannerPosCombo = new DarkCombo { Size = new Size(146, 24), Anchor = AnchorStyles.Right };
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopCenter, "Top center"));
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.TopRight, "Top right"));
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.BottomRight, "Bottom right"));
         _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.ActiveScreenTop, "Active monitor top"));
+        _muteBannerPosCombo.Items.Add(new BannerPosChoice(MuteBannerPosition.Custom, "Custom (dragged)"));
         _muteBannerPosCombo.SelectedIndexChanged += (_, _) =>
         {
             if (_updatingBannerPosCombo || _muteBannerPosCombo.SelectedItem is not BannerPosChoice pos) return;
@@ -622,35 +732,31 @@ public sealed class MainForm : Form
         };
         t.Controls.Add(_muteBannerPosCombo);
 
-        AddHeader(t, "SYSTEM");
+        AddHeader(t, "PROFILES, SYSTEM & UPDATES");
         t.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
         t.Controls.Add(NewToggle(IsStartupEnabled(), SetStartupSafe));
 
         var filterBtn = MakeActionButton("Choose devices for cycling…", (_, _) => _ = OpenDeviceFilterDialogAsync());
-        filterBtn.Margin = new Padding(0, 10, 0, 0);
+        filterBtn.Margin = new Padding(0, 8, 0, 0);
         t.Controls.Add(filterBtn);
         t.SetColumnSpan(filterBtn, 2);
 
-        var dataRow = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Height = 36,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = new Padding(0, 6, 0, 0),
-            BackColor = Theme.BgCard
-        };
-        dataRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        dataRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        var profileIoRow = MakeTwoButtonRow(
+            ("Export Profiles…", (_, _) => ExportProfiles()),
+            ("Import Profiles…", (_, _) => ImportProfiles()));
+        t.Controls.Add(profileIoRow);
+        t.SetColumnSpan(profileIoRow, 2);
 
-        var openFolderBtn = MakeActionButton("Open Data Folder", (_, _) => OpenPathInShell(AppLog.DataDir, isDirectory: true));
-        openFolderBtn.Margin = new Padding(0, 0, 4, 0);
-        var openLogBtn = MakeActionButton("Open Log File", (_, _) => OpenPathInShell(AppLog.FilePath, isDirectory: false));
-        openLogBtn.Margin = new Padding(4, 0, 0, 0);
-        dataRow.Controls.Add(openFolderBtn, 0, 0);
-        dataRow.Controls.Add(openLogBtn, 1, 0);
+        var dataRow = MakeTwoButtonRow(
+            ("Open Data Folder", (_, _) => OpenPathInShell(AppLog.DataDir, isDirectory: true)),
+            ("Open Log File", (_, _) => OpenPathInShell(AppLog.FilePath, isDirectory: false)));
         t.Controls.Add(dataRow);
         t.SetColumnSpan(dataRow, 2);
+
+        _checkUpdateBtn = MakeActionButton($"Check for Updates (current: v{AppInfo.Version})", (_, _) => _ = CheckForUpdatesAsync());
+        _checkUpdateBtn.Margin = new Padding(0, 6, 0, 0);
+        t.Controls.Add(_checkUpdateBtn);
+        t.SetColumnSpan(_checkUpdateBtn, 2);
 
         var pathLbl = new Label
         {
@@ -659,7 +765,7 @@ public sealed class MainForm : Form
             ForeColor = Theme.TextMuted,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 52,
+            Height = 50,
             Margin = new Padding(0, 8, 0, 0)
         };
         t.Controls.Add(pathLbl);
@@ -670,6 +776,31 @@ public sealed class MainForm : Form
         RefreshFallbackCombo();
         RefreshMuteBannerPosCombo();
         return panel;
+    }
+
+    private static TableLayoutPanel MakeTwoButtonRow(
+        (string Text, EventHandler OnClick) left,
+        (string Text, EventHandler OnClick) right)
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Height = 36,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 6, 0, 0),
+            BackColor = Theme.BgCard
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+
+        var leftBtn = MakeActionButton(left.Text, left.OnClick);
+        leftBtn.Margin = new Padding(0, 0, 4, 0);
+        var rightBtn = MakeActionButton(right.Text, right.OnClick);
+        rightBtn.Margin = new Padding(4, 0, 0, 0);
+        row.Controls.Add(leftBtn, 0, 0);
+        row.Controls.Add(rightBtn, 1, 0);
+        return row;
     }
 
     private static Button MakeActionButton(string text, EventHandler onClick)
@@ -688,6 +819,96 @@ public sealed class MainForm : Form
         b.FlatAppearance.BorderColor = Theme.BgBorder;
         b.Click += onClick;
         return b;
+    }
+
+    private void ExportProfiles()
+    {
+        using var sfd = new SaveFileDialog
+        {
+            Title = "Export Audio Profiles",
+            Filter = "JSON Profile Bundle (*.json)|*.json|All Files (*.*)|*.*",
+            FileName = "AudioProfileSwitcher-profiles.json",
+            DefaultExt = "json"
+        };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            File.WriteAllText(sfd.FileName, ProfileLogic.ExportProfilesJson(_config));
+            SetStatus($"Exported {_config.Cards.Count} card(s) to {Path.GetFileName(sfd.FileName)}", false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to export profiles", ex);
+            SetStatus("Export failed: " + ex.Message, true);
+        }
+    }
+
+    private void ImportProfiles()
+    {
+        using var ofd = new OpenFileDialog
+        {
+            Title = "Import Audio Profiles",
+            Filter = "JSON Profile Bundle (*.json)|*.json|All Files (*.*)|*.*"
+        };
+        if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var json = File.ReadAllText(ofd.FileName);
+            var (addedCards, addedFilters) = ProfileLogic.ImportProfilesJson(json, _config, _snap);
+            Save();
+            RenderCards();
+            SetStatus($"Imported {addedCards} new card(s) and {addedFilters} filter item(s)", false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to import profiles", ex);
+            SetStatus("Import failed: " + ex.Message, true);
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        _checkUpdateBtn.Enabled = false;
+        _checkUpdateBtn.Text = "Checking GitHub Releases…";
+        try
+        {
+            var res = await UpdateService.CheckForUpdatesAsync();
+            if (IsDisposed) return;
+
+            if (!res.UpdateAvailable)
+            {
+                SetStatus($"You're on the latest version (v{AppInfo.Version})", false);
+                return;
+            }
+
+            SetStatus($"Update available: {res.LatestVersion}", false);
+            var answer = MessageBox.Show(
+                this,
+                $"A newer release ({res.LatestVersion}) is available on GitHub.\n\nOpen the release download page in your browser?",
+                "Update Available",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+
+            if (answer == DialogResult.Yes)
+            {
+                Process.Start(new ProcessStartInfo { FileName = res.ReleaseUrl, UseShellExecute = true });
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Update check failed", ex);
+            if (!IsDisposed) SetStatus("Couldn't check for updates: " + ex.Message, true);
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                _checkUpdateBtn.Enabled = true;
+                _checkUpdateBtn.Text = $"Check for Updates (current: v{AppInfo.Version})";
+            }
+        }
     }
 
     private void OpenPathInShell(string path, bool isDirectory)
@@ -829,7 +1050,8 @@ public sealed class MainForm : Form
         _gearBtn.ForeColor = _settingsOpen ? Theme.Accent : Theme.TextMuted;
     }
 
-    private string? SlotFor(int index) => _config.JumpHotKeysEnabled && index < 9 ? (index + 1).ToString() : null;
+    private string? SlotFor(int index) =>
+        _config.JumpHotKeysEnabled && _config.CardHotKey.IsEnabled && index < 9 ? (index + 1).ToString() : null;
 
     private void RenderCards()
     {
@@ -858,7 +1080,6 @@ public sealed class MainForm : Form
             }
         }
 
-        // Remove and dispose only controls whose cards were deleted.
         foreach (var stale in existingById.Values)
         {
             _cardsPanel.Controls.Remove(stale);
@@ -1156,6 +1377,7 @@ public sealed class MainForm : Form
         HotKeyTarget.Card => _config.CardHotKey,
         HotKeyTarget.Output => _config.OutputHotKey,
         HotKeyTarget.Input => _config.InputHotKey,
+        HotKeyTarget.ToggleWindow => _config.ToggleWindowHotKey,
         _ => _config.MuteHotKey
     };
 
@@ -1166,6 +1388,7 @@ public sealed class MainForm : Form
             case HotKeyTarget.Card: _config.CardHotKey = b; break;
             case HotKeyTarget.Output: _config.OutputHotKey = b; break;
             case HotKeyTarget.Input: _config.InputHotKey = b; break;
+            case HotKeyTarget.ToggleWindow: _config.ToggleWindowHotKey = b; break;
             default: _config.MuteHotKey = b; break;
         }
     }
@@ -1175,6 +1398,7 @@ public sealed class MainForm : Form
         HotKeyTarget.Card => "Cycle Cards",
         HotKeyTarget.Output => "Cycle Output",
         HotKeyTarget.Input => "Cycle Input",
+        HotKeyTarget.ToggleWindow => "Show / Hide Window",
         _ => "Toggle Mic Mute"
     };
 
@@ -1187,10 +1411,11 @@ public sealed class MainForm : Form
             ("Cycle Cards", _config.CardHotKey, () => _ = CycleCardAsync()),
             ("Cycle Output", _config.OutputHotKey, () => _ = CycleOutputAsync()),
             ("Cycle Input", _config.InputHotKey, () => _ = CycleInputAsync()),
-            ("Toggle Mic Mute", _config.MuteHotKey, () => _ = ToggleMicMuteAsync())
+            ("Toggle Mic Mute", _config.MuteHotKey, () => _ = ToggleMicMuteAsync()),
+            ("Show / Hide Window", _config.ToggleWindowHotKey, ToggleWindowVisibility)
         };
 
-        if (_config.JumpHotKeysEnabled)
+        if (_config.JumpHotKeysEnabled && _config.CardHotKey.IsEnabled)
         {
             int count = Math.Min(9, _config.Cards.Count);
             for (int i = 0; i < count; i++)
@@ -1216,10 +1441,13 @@ public sealed class MainForm : Form
     {
         foreach (var (target, btn) in _hkButtons)
         {
-            btn.Text = GetBinding(target).Format();
-            btn.ForeColor = Theme.TextPrimary;
+            var b = GetBinding(target);
+            btn.Text = b.Format();
+            btn.ForeColor = b.IsEnabled ? Theme.TextPrimary : Theme.TextMuted;
         }
-        _jumpLabel.Text = $"Jump straight to card N with {_config.CardHotKey.FormatModifiers()} + 1-9";
+        _jumpLabel.Text = _config.CardHotKey.IsEnabled
+            ? $"Jump straight to card N with {_config.CardHotKey.FormatModifiers()} + 1-9"
+            : "Jump straight to card N (requires Cycle Cards hotkey)";
     }
 
     private void BeginCapture(HotKeyTarget target)
@@ -1230,13 +1458,14 @@ public sealed class MainForm : Form
         var btn = _hkButtons[target];
         btn.Text = "Press keys…";
         btn.ForeColor = Theme.Accent;
-        SetStatus("Press the new shortcut (Esc to cancel)", false);
+        SetStatus("Press shortcut (Backspace/Del to disable, Esc to cancel)", false);
     }
 
     private bool EndCapture()
     {
         _capturing = null;
         UpdateHotKeyButtons();
+        RefreshCardSlots();
         return RegisterAllHotKeys(force: true);
     }
 
@@ -1275,6 +1504,15 @@ public sealed class MainForm : Form
         if ((keyData & Keys.Shift) != 0) mods |= HotKeyModifiers.Shift;
         if ((keyData & Keys.Alt) != 0) mods |= HotKeyModifiers.Alt;
         if (Native.WinKeyDown()) mods |= HotKeyModifiers.Win;
+
+        if (mods == HotKeyModifiers.None && key is Keys.Back or Keys.Delete)
+        {
+            SetBinding(target, new HotKeyBinding { Modifiers = HotKeyModifiers.None, Key = Keys.None });
+            Save();
+            EndCapture();
+            SetStatus($"{TargetName(target)} disabled", false);
+            return true;
+        }
 
         if (mods == HotKeyModifiers.None)
         {
@@ -1558,7 +1796,6 @@ public sealed class MainForm : Form
         var removedIds = new HashSet<Guid>(previous.OutputIds.Except(now.OutputIds));
         removedIds.UnionWith(previous.InputIds.Except(now.InputIds));
 
-        // 1. Debounced auto-activate for newly connected devices (with flapping guard)
         if (newIds.Count > 0)
         {
             var cutoff = DateTime.UtcNow.AddSeconds(-30);
@@ -1585,7 +1822,6 @@ public sealed class MainForm : Form
             }
         }
 
-        // 2. Fallback card (None, PreviousCard, SpecificCard) if the active card's device disconnected
         var fallback = ProfileLogic.ResolveFallbackCard(_config, previous, now, removedIds);
         if (fallback != null)
         {
@@ -1622,8 +1858,15 @@ public sealed class MainForm : Form
     private void ApplyMuteUi(bool muted)
     {
         _micMuted = muted;
-        if (muted && _config.MuteBannerEnabled) _muteBanner.ShowBanner(_config.MuteBannerPosition);
-        else _muteBanner.Hide();
+        _muteBanner.Interactive = _config.MuteBannerInteractive;
+        if (muted && _config.MuteBannerEnabled)
+        {
+            _muteBanner.ShowBanner(_config.MuteBannerPosition, _config.MuteBannerX, _config.MuteBannerY);
+        }
+        else
+        {
+            _muteBanner.Hide();
+        }
         _tray.Icon = muted ? TrayIcons.Muted : TrayIcons.Normal;
         UpdateNow();
     }
@@ -1641,7 +1884,12 @@ public sealed class MainForm : Form
             item.Dispose();
         }
 
-        items.Add("Open AudioSwitcher", null, (_, _) => ShowFromTray());
+        var openItem = new ToolStripMenuItem("Open AudioSwitcher")
+        {
+            ShortcutKeyDisplayString = _config.ToggleWindowHotKey.IsEnabled ? _config.ToggleWindowHotKey.Format() : ""
+        };
+        openItem.Click += (_, _) => ShowFromTray();
+        items.Add(openItem);
 
         if (_config.Cards.Count > 0)
         {
@@ -1663,7 +1911,7 @@ public sealed class MainForm : Form
 
             var cycleCardsItem = new ToolStripMenuItem("Cycle Cards")
             {
-                ShortcutKeyDisplayString = _config.CardHotKey.Format()
+                ShortcutKeyDisplayString = _config.CardHotKey.IsEnabled ? _config.CardHotKey.Format() : ""
             };
             cycleCardsItem.Click += (_, _) => _ = CycleCardAsync();
             items.Add(cycleCardsItem);
@@ -1677,7 +1925,7 @@ public sealed class MainForm : Form
         var muteItem = new ToolStripMenuItem("Toggle Mic Mute")
         {
             Checked = _micMuted,
-            ShortcutKeyDisplayString = _config.MuteHotKey.Format()
+            ShortcutKeyDisplayString = _config.MuteHotKey.IsEnabled ? _config.MuteHotKey.Format() : ""
         };
         muteItem.Click += (_, _) => _ = ToggleMicMuteAsync();
         items.Add(muteItem);
@@ -1711,9 +1959,10 @@ public sealed class MainForm : Form
             }
 
             root.DropDownItems.Add(new ToolStripSeparator());
+            var hk = isOutput ? _config.OutputHotKey : _config.InputHotKey;
             var cycleItem = new ToolStripMenuItem(isOutput ? "Cycle Output" : "Cycle Input")
             {
-                ShortcutKeyDisplayString = (isOutput ? _config.OutputHotKey : _config.InputHotKey).Format()
+                ShortcutKeyDisplayString = hk.IsEnabled ? hk.Format() : ""
             };
             cycleItem.Click += (_, _) =>
             {

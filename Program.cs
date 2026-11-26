@@ -78,6 +78,7 @@ internal static class Native
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
     [DllImport("user32.dll")] private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     /// <summary>Dark caption bar for standard dialogs (Windows 10 20H1+ / 11).</summary>
     public static void DarkTitleBar(IntPtr hwnd)
@@ -97,6 +98,11 @@ internal static class Native
     {
         ReleaseCapture();
         SendMessage(hwnd, 0xA1, 0x2, 0); // WM_NCLBUTTONDOWN, HTCAPTION
+    }
+
+    public static void BringToFrontNative(IntPtr hwnd)
+    {
+        try { SetForegroundWindow(hwnd); } catch { }
     }
 
     public static bool WinKeyDown() =>

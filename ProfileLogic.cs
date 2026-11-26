@@ -1,12 +1,53 @@
 using System.Drawing;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace AudioProfileSwitcher;
 
+public readonly record struct ReleaseCheckResult(
+    bool UpdateAvailable,
+    string LatestVersion,
+    string ReleaseUrl);
+
 /// <summary>
-/// Platform-independent profile, migration, device-relinking, fallback, layout, and single-flight logic.
+/// Platform-independent profile, migration, device-relinking, fallback, layout, import/export,
+/// update version parsing, and single-flight logic.
 /// </summary>
 public static class ProfileLogic
 {
+    private static readonly JsonSerializerOptions ExportJsonOpts = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true
+    };
+
+    /// <summary>
+    /// Extracts the endpoint GUID from Windows CoreAudio IDs such as
+    /// "{0.0.0.00000000}.{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}", preserving 100% compatibility
+    /// with existing config.json GUIDs, with a deterministic SHA-256 fallback for custom drivers.
+    /// </summary>
+    public static Guid ParseEndpointGuid(string endpointId)
+    {
+        if (string.IsNullOrWhiteSpace(endpointId)) return Guid.Empty;
+
+        int lastOpen = endpointId.LastIndexOf('{');
+        int lastClose = endpointId.LastIndexOf('}');
+        if (lastOpen >= 0 && lastClose > lastOpen + 1)
+        {
+            var slice = endpointId.AsSpan(lastOpen + 1, lastClose - lastOpen - 1);
+            if (Guid.TryParse(slice, out var parsed))
+                return parsed;
+        }
+
+        if (Guid.TryParse(endpointId, out var direct))
+            return direct;
+
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(endpointId.ToLowerInvariant()), hash);
+        return new Guid(hash[..16]);
+    }
+
     public static bool IsMeaningfulDeviceName(string? name) =>
         !string.IsNullOrWhiteSpace(name) &&
         !name.Equals("None", StringComparison.OrdinalIgnoreCase) &&
@@ -18,7 +59,6 @@ public static class ProfileLogic
     {
         bool changed = false;
 
-        // Materialize implicit fallback mode so subsequent saves write it explicitly.
         var mode = config.FallbackMode;
         if (mode == FallbackMode.SpecificCard)
         {
@@ -338,11 +378,14 @@ public static class ProfileLogic
 
     public static string? FindHotKeyConflict(AppConfig config, HotKeyTarget target, HotKeyBinding candidate)
     {
+        if (!candidate.IsEnabled) return null;
+
         static HotKeyBinding GetBinding(AppConfig cfg, HotKeyTarget t) => t switch
         {
             HotKeyTarget.Card => cfg.CardHotKey,
             HotKeyTarget.Output => cfg.OutputHotKey,
             HotKeyTarget.Input => cfg.InputHotKey,
+            HotKeyTarget.ToggleWindow => cfg.ToggleWindowHotKey,
             _ => cfg.MuteHotKey
         };
 
@@ -351,6 +394,7 @@ public static class ProfileLogic
             HotKeyTarget.Card => "Cycle Cards",
             HotKeyTarget.Output => "Cycle Output",
             HotKeyTarget.Input => "Cycle Input",
+            HotKeyTarget.ToggleWindow => "Show / Hide Window",
             _ => "Toggle Mic Mute"
         };
 
@@ -360,10 +404,10 @@ public static class ProfileLogic
                 return TargetName(other);
         }
 
-        if (config.JumpHotKeysEnabled)
+        if (config.JumpHotKeysEnabled && config.CardHotKey.IsEnabled)
         {
             static bool IsJump(HotKeyBinding b, HotKeyModifiers mods) =>
-                b.Modifiers == mods && b.Key >= Keys.D1 && b.Key <= Keys.D9;
+                b.IsEnabled && b.Modifiers == mods && b.Key >= Keys.D1 && b.Key <= Keys.D9;
 
             if (target != HotKeyTarget.Card && IsJump(candidate, config.CardHotKey.Modifiers))
                 return "Jump to card";
@@ -394,7 +438,6 @@ public static class ProfileLogic
             string prefix = s[..open].Trim();
             string inner = s[(open + 1)..close].Trim();
 
-            // Strip noisy driver tokens like "Realtek(R) Audio" -> keep prefix ("Speakers")
             bool genericAdapter =
                 inner.Contains("Realtek", StringComparison.OrdinalIgnoreCase) ||
                 inner.Contains("High Definition Audio", StringComparison.OrdinalIgnoreCase) ||
@@ -458,8 +501,17 @@ public static class ProfileLogic
         Rectangle workingArea,
         Size bannerSize,
         MuteBannerPosition position,
-        float dpiScale)
+        float dpiScale,
+        int? customX = null,
+        int? customY = null)
     {
+        if (position == MuteBannerPosition.Custom && customX.HasValue && customY.HasValue)
+        {
+            int cx = Math.Clamp(customX.Value, workingArea.Left, Math.Max(workingArea.Left, workingArea.Right - bannerSize.Width));
+            int cy = Math.Clamp(customY.Value, workingArea.Top, Math.Max(workingArea.Top, workingArea.Bottom - bannerSize.Height));
+            return new Point(cx, cy);
+        }
+
         int padX = (int)Math.Round(16 * dpiScale);
         int padY = (int)Math.Round(14 * dpiScale);
 
@@ -471,12 +523,14 @@ public static class ProfileLogic
             MuteBannerPosition.BottomRight => new Point(
                 workingArea.Right - bannerSize.Width - padX,
                 workingArea.Bottom - bannerSize.Height - padY),
-            // TopCenter & ActiveScreenTop both center horizontally near the top of the chosen screen.
             _ => new Point(
                 workingArea.Left + (workingArea.Width - bannerSize.Width) / 2,
                 workingArea.Top + padY)
         };
     }
+
+    public static int ClampWindowHeight(int? savedHeight, int minHeight = 420, int maxHeight = 1400, int defaultHeight = 620) =>
+        Math.Clamp(savedHeight ?? defaultHeight, minHeight, Math.Max(minHeight, maxHeight));
 
     public static Point ClampWindowLocation(Point saved, Size windowSize, IReadOnlyList<Rectangle> workingAreas)
     {
@@ -496,11 +550,123 @@ public static class ProfileLogic
             }
         }
 
-        // Saved monitor is disconnected: clamp onto the primary/first screen's working area.
         var fallback = workingAreas[0];
         int x = Math.Clamp(saved.X, fallback.Left, Math.Max(fallback.Left, fallback.Right - windowSize.Width));
         int y = Math.Clamp(saved.Y, fallback.Top, Math.Max(fallback.Top, fallback.Bottom - windowSize.Height));
         return new Point(x, y);
+    }
+
+    public static string ExportProfilesJson(AppConfig config)
+    {
+        var bundle = new ProfileExportBundle
+        {
+            Version = AppInfo.Version,
+            ExportedAtUtc = DateTime.UtcNow,
+            Cards = config.Cards,
+            FallbackMode = config.FallbackMode,
+            FallbackCardId = config.FallbackCardId,
+            CycleOutputs = config.CycleOutputs,
+            CycleInputs = config.CycleInputs
+        };
+        return JsonSerializer.Serialize(bundle, ExportJsonOpts);
+    }
+
+    /// <summary>
+    /// Imports cards and cycle filters from either a ProfileExportBundle or a full AppConfig JSON file,
+    /// merging new cards by ID/name and relinking against the current machine's connected devices.
+    /// </summary>
+    public static (int AddedCards, int AddedFilters) ImportProfilesJson(
+        string json,
+        AppConfig targetConfig,
+        AudioSnapshot? currentSnap = null)
+    {
+        var bundle = JsonSerializer.Deserialize<ProfileExportBundle>(json, ExportJsonOpts)
+            ?? throw new InvalidDataException("Empty profile file.");
+
+        int addedCards = 0;
+        foreach (var incoming in bundle.Cards)
+        {
+            if (incoming.OutputVolume.HasValue) incoming.OutputVolume = Math.Clamp(incoming.OutputVolume.Value, 0, 100);
+            if (incoming.InputVolume.HasValue) incoming.InputVolume = Math.Clamp(incoming.InputVolume.Value, 0, 100);
+
+            int existingIdx = targetConfig.Cards.FindIndex(c => c.Id == incoming.Id);
+            if (existingIdx >= 0)
+            {
+                targetConfig.Cards[existingIdx] = incoming;
+            }
+            else
+            {
+                if (incoming.Id == Guid.Empty) incoming.Id = Guid.NewGuid();
+                targetConfig.Cards.Add(incoming);
+                addedCards++;
+            }
+        }
+
+        int addedFilters = 0;
+        foreach (var fo in bundle.CycleOutputs)
+        {
+            if (targetConfig.CycleOutputs.Any(x => x.Id == fo.Id ||
+                (IsMeaningfulDeviceName(fo.Name) && x.Name.Equals(fo.Name, StringComparison.OrdinalIgnoreCase))))
+                continue;
+            targetConfig.CycleOutputs.Add(fo);
+            addedFilters++;
+        }
+
+        foreach (var fi in bundle.CycleInputs)
+        {
+            if (targetConfig.CycleInputs.Any(x => x.Id == fi.Id ||
+                (IsMeaningfulDeviceName(fi.Name) && x.Name.Equals(fi.Name, StringComparison.OrdinalIgnoreCase))))
+                continue;
+            targetConfig.CycleInputs.Add(fi);
+            addedFilters++;
+        }
+
+        if (bundle.FallbackMode == FallbackMode.PreviousCard && targetConfig.FallbackMode == FallbackMode.None)
+        {
+            targetConfig.FallbackMode = FallbackMode.PreviousCard;
+        }
+        else if (bundle.FallbackMode == FallbackMode.SpecificCard &&
+                 bundle.FallbackCardId.HasValue &&
+                 targetConfig.FallbackMode == FallbackMode.None &&
+                 targetConfig.Cards.Any(c => c.Id == bundle.FallbackCardId.Value))
+        {
+            targetConfig.FallbackMode = FallbackMode.SpecificCard;
+            targetConfig.FallbackCardId = bundle.FallbackCardId;
+        }
+
+        if (currentSnap != null)
+        {
+            RelinkByName(targetConfig, currentSnap);
+        }
+
+        return (addedCards, addedFilters);
+    }
+
+    public static ReleaseCheckResult ParseLatestRelease(string releaseJson, string currentVersion = AppInfo.Version)
+    {
+        using var doc = JsonDocument.Parse(releaseJson);
+        var root = doc.RootElement;
+
+        string tag = root.TryGetProperty("tag_name", out var tagProp) ? (tagProp.GetString() ?? "") : "";
+        string url = root.TryGetProperty("html_url", out var urlProp) && !string.IsNullOrWhiteSpace(urlProp.GetString())
+            ? urlProp.GetString()!
+            : AppInfo.ReleasesPageUrl;
+
+        string cleanLatest = tag.Trim().TrimStart('v', 'V');
+        string cleanCurrent = currentVersion.Trim().TrimStart('v', 'V');
+
+        int dashLatest = cleanLatest.IndexOf('-');
+        if (dashLatest > 0) cleanLatest = cleanLatest[..dashLatest];
+        int dashCurrent = cleanCurrent.IndexOf('-');
+        if (dashCurrent > 0) cleanCurrent = cleanCurrent[..dashCurrent];
+
+        if (Version.TryParse(cleanLatest, out var latestVer) &&
+            Version.TryParse(cleanCurrent, out var curVer))
+        {
+            return new ReleaseCheckResult(latestVer > curVer, string.IsNullOrEmpty(tag) ? $"v{latestVer}" : tag, url);
+        }
+
+        return new ReleaseCheckResult(false, string.IsNullOrEmpty(tag) ? $"v{currentVersion}" : tag, url);
     }
 }
 

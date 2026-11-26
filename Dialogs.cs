@@ -96,7 +96,6 @@ internal sealed class CardEditorDialog : DarkDialog
             Margin = Padding.Empty
         };
 
-        // Output device + optional output volume
         _out.Location = new Point(16, 108); _out.Width = 328;
         Fill(_out, outputs, card.OutputId, card.OutputName, "(Don't change)");
 
@@ -130,11 +129,9 @@ internal sealed class CardEditorDialog : DarkDialog
         };
         _outVolSlider.ValueChanged += (_, _) => UpdateVolumeLabels();
 
-        // Separate voice / communications output
         _commOut.Location = new Point(16, 194); _commOut.Width = 328;
         Fill(_commOut, outputs, card.CommOutputId, card.CommOutputName, "(Same as output)");
 
-        // Input device + optional input volume
         _in.Location = new Point(16, 252); _in.Width = 328;
         Fill(_in, inputs, card.InputId, card.InputName, "(Don't change)");
 
@@ -168,7 +165,6 @@ internal sealed class CardEditorDialog : DarkDialog
         };
         _inVolSlider.ValueChanged += (_, _) => UpdateVolumeLabels();
 
-        // Auto-activate on connect
         _auto = new ToggleSwitch { Location = new Point(16, 332), Checked = card.AutoActivate };
         var autoLbl = new Label
         {
@@ -299,7 +295,6 @@ internal sealed class CardEditorDialog : DarkDialog
             }
             if (selected < 0)
             {
-                // Keep a card's saved device even while it's unplugged, so editing never loses it.
                 combo.Items.Add(new DeviceItem(selectedId, savedName, false));
                 selected = combo.Items.Count - 1;
             }
@@ -318,32 +313,39 @@ internal sealed class CardEditorDialog : DarkDialog
 
 internal sealed class DeviceFilterDialog : DarkDialog
 {
-    private readonly CheckedListBox _outList;
-    private readonly CheckedListBox _inList;
+    private readonly DarkCheckedList _outList;
+    private readonly DarkCheckedList _inList;
 
     public DeviceFilterDialog(
         IReadOnlyList<DeviceItem> outputs,
         IReadOnlyList<DeviceItem> inputs,
         IReadOnlyList<CycleDeviceEntry> selectedOut,
         IReadOnlyList<CycleDeviceEntry> selectedIn)
-        : base("Cycle Device Filter", new Size(376, 412))
+        : base("Cycle Device Filter", new Size(388, 424))
     {
-        _outList = MakeList(new Point(16, 34), 132);
+        _outList = new DarkCheckedList { Location = new Point(16, 34), Size = new Size(356, 138) };
         PopulateList(_outList, outputs, selectedOut);
 
-        _inList = MakeList(new Point(16, 198), 132);
+        _inList = new DarkCheckedList { Location = new Point(16, 204), Size = new Size(356, 138) };
         PopulateList(_inList, inputs, selectedIn);
 
-        var clearBtn = MakeButton("Clear All", new Point(16, 352), false, width: 92);
+        var clearBtn = MakeButton("Clear All", new Point(16, 364), false, width: 84);
         clearBtn.Click += (_, _) =>
         {
-            UncheckAll(_outList);
-            UncheckAll(_inList);
+            _outList.SetAllChecked(false);
+            _inList.SetAllChecked(false);
         };
 
-        var save = MakeButton("Save Filter", new Point(152, 352), true);
+        var selectAllBtn = MakeButton("Select All", new Point(106, 364), false, width: 84);
+        selectAllBtn.Click += (_, _) =>
+        {
+            _outList.SetAllChecked(true);
+            _inList.SetAllChecked(true);
+        };
+
+        var save = MakeButton("Save Filter", new Point(198, 364), true, width: 92);
         save.DialogResult = DialogResult.OK;
-        var cancel = MakeButton("Cancel", new Point(260, 352), false);
+        var cancel = MakeButton("Cancel", new Point(296, 364), false, width: 76);
         cancel.DialogResult = DialogResult.Cancel;
         AcceptButton = save;
         CancelButton = cancel;
@@ -351,13 +353,13 @@ internal sealed class DeviceFilterDialog : DarkDialog
         Controls.AddRange(new Control[]
         {
             MakeLabel("Include in Cycle Output (none checked = all):", new Point(16, 12)), _outList,
-            MakeLabel("Include in Cycle Input (none checked = all):", new Point(16, 176)), _inList,
-            clearBtn, save, cancel
+            MakeLabel("Include in Cycle Input (none checked = all):", new Point(16, 182)), _inList,
+            clearBtn, selectAllBtn, save, cancel
         });
     }
 
     private static void PopulateList(
-        CheckedListBox list,
+        DarkCheckedList list,
         IReadOnlyList<DeviceItem> connected,
         IReadOnlyList<CycleDeviceEntry> saved)
     {
@@ -379,10 +381,9 @@ internal sealed class DeviceFilterDialog : DarkDialog
             }
 
             if (idx >= 0) matchedSavedIndices.Add(idx);
-            list.Items.Add(d, idx >= 0);
+            list.AddItem(d, idx >= 0);
         }
 
-        // Show saved offline devices directly in the list so the user can see or uncheck them.
         for (int i = 0; i < saved.Count; i++)
         {
             if (matchedSavedIndices.Contains(i)) continue;
@@ -390,31 +391,15 @@ internal sealed class DeviceFilterDialog : DarkDialog
             string label = ProfileLogic.IsMeaningfulDeviceName(entry.Name)
                 ? entry.Name
                 : $"Saved device ({entry.Id.ToString()[..8]})";
-            list.Items.Add(new DeviceItem(entry.Id, label, Connected: false), isChecked: true);
+            list.AddItem(new DeviceItem(entry.Id, label, Connected: false), isChecked: true);
         }
     }
-
-    private static void UncheckAll(CheckedListBox list)
-    {
-        for (int i = 0; i < list.Items.Count; i++)
-            list.SetItemChecked(i, false);
-    }
-
-    private static CheckedListBox MakeList(Point location, int height) => new()
-    {
-        Location = location,
-        Size = new Size(344, height),
-        BackColor = Theme.BgCard,
-        ForeColor = Theme.TextPrimary,
-        BorderStyle = BorderStyle.FixedSingle,
-        CheckOnClick = true
-    };
 
     public List<CycleDeviceEntry> SelectedOutputs => Collect(_outList);
     public List<CycleDeviceEntry> SelectedInputs => Collect(_inList);
 
-    private static List<CycleDeviceEntry> Collect(CheckedListBox list) =>
-        list.CheckedItems.Cast<DeviceItem>()
+    private static List<CycleDeviceEntry> Collect(DarkCheckedList list) =>
+        list.GetCheckedItems()
             .Where(d => d.Id.HasValue)
             .Select(d => new CycleDeviceEntry { Id = d.Id!.Value, Name = d.Name })
             .ToList();
