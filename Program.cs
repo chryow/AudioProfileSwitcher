@@ -1,19 +1,21 @@
-using System.Drawing.Drawing2D;
+using System.Media;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using AudioSwitcher.AudioApi;
 using AudioSwitcher.AudioApi.CoreAudio;
+using Microsoft.Win32;
 
 namespace AudioProfileSwitcher;
 
 static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        bool startMinimized = args.Contains("--minimized", StringComparer.OrdinalIgnoreCase);
+        Application.Run(new MainForm(startMinimized));
     }
 }
 
@@ -50,16 +52,24 @@ public class AppConfig
     public HotKeyBinding CardHotKey { get; set; } = new() { Modifiers = 0x0006, Key = Keys.A };
     public HotKeyBinding OutputHotKey { get; set; } = new() { Modifiers = 0x0006, Key = Keys.O };
     public HotKeyBinding InputHotKey { get; set; } = new() { Modifiers = 0x0006, Key = Keys.I };
+    public HotKeyBinding MuteHotKey { get; set; } = new() { Modifiers = 0x0006, Key = Keys.M };
+    public List<Guid> CycleOutputIds { get; set; } = new();
+    public List<Guid> CycleInputIds { get; set; } = new();
+    public bool ChimeEnabled { get; set; } = true;
 }
 
 public sealed class MainForm : Form
 {
+    private const string StartupRegKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    private const string AppRegName = "AudioProfileSwitcher";
+
     // Theme palette
     private static readonly Color BgMain = Color.FromArgb(18, 19, 22);
     private static readonly Color BgCard = Color.FromArgb(27, 29, 35);
     private static readonly Color BgCardHover = Color.FromArgb(35, 38, 46);
     private static readonly Color BgBorder = Color.FromArgb(46, 50, 60);
     private static readonly Color Accent = Color.FromArgb(88, 101, 242);
+    private static readonly Color Danger = Color.FromArgb(237, 66, 69);
     private static readonly Color TextPrimary = Color.FromArgb(242, 244, 248);
     private static readonly Color TextMuted = Color.FromArgb(148, 155, 168);
 
@@ -67,6 +77,9 @@ public sealed class MainForm : Form
     private readonly string _configPath;
     private readonly NotifyIcon _trayIcon;
     private readonly HotKeyManager _hotKeys;
+    private readonly OsdBannerForm _osd;
+    private readonly MuteBannerForm _muteBanner;
+    private readonly bool _startMinimized;
     private AppConfig _config;
 
     private readonly FlowLayoutPanel _cardsPanel;
@@ -74,23 +87,27 @@ public sealed class MainForm : Form
     private readonly Button _btnCardHk;
     private readonly Button _btnOutHk;
     private readonly Button _btnInHk;
+    private readonly Button _btnMuteHk;
 
     private string? _capturingHotKeyTarget;
     private bool _allowClose;
 
-    // Drag borderless window
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
     [DllImport("user32.dll")] private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
 
-    public MainForm()
+    public MainForm(bool startMinimized = false)
     {
+        _startMinimized = startMinimized;
         _configPath = Path.Combine(AppContext.BaseDirectory, "config.json");
         _config = LoadConfig();
 
+        _osd = new OsdBannerForm();
+        _muteBanner = new MuteBannerForm();
+
         // Window setup
         Text = "AudioSwitcher";
-        Size = new Size(370, 500);
-        MinimumSize = new Size(370, 500);
+        Size = new Size(370, 586);
+        MinimumSize = new Size(370, 586);
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = BgMain;
@@ -120,15 +137,30 @@ public sealed class MainForm : Form
         var actionBar = new Panel { Dock = DockStyle.Top, Height = 42, BackColor = BgMain, Padding = new Padding(16, 0, 16, 8) };
         _statusLabel = new Label
         {
-            Text = "Select or add a card",
+            Text = "Ready",
             Font = new Font("Segoe UI", 8.5f),
             ForeColor = TextMuted,
             AutoSize = false,
-            Width = 210,
+            Width = 165,
             Height = 28,
             TextAlign = ContentAlignment.MiddleLeft,
-            Location = new Point(16, 2)
+            Location = new Point(16, 2),
+            AutoEllipsis = true
         };
+
+        var filterBtn = new Button
+        {
+            Text = "Filter",
+            Font = new Font("Segoe UI", 8.5f),
+            ForeColor = TextPrimary,
+            BackColor = BgCard,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(58, 28),
+            Location = new Point(192, 2),
+            Cursor = Cursors.Hand
+        };
+        filterBtn.FlatAppearance.BorderColor = BgBorder;
+        filterBtn.Click += (_, _) => OpenDeviceFilterDialog();
 
         var addBtn = new Button
         {
@@ -143,7 +175,7 @@ public sealed class MainForm : Form
         };
         addBtn.FlatAppearance.BorderSize = 0;
         addBtn.Click += (_, _) => OpenCardEditor(null);
-        actionBar.Controls.AddRange(new Control[] { _statusLabel, addBtn });
+        actionBar.Controls.AddRange(new Control[] { _statusLabel, filterBtn, addBtn });
 
         // Cards List
         _cardsPanel = new FlowLayoutPanel
@@ -156,8 +188,8 @@ public sealed class MainForm : Form
             Padding = new Padding(16, 4, 16, 8)
         };
 
-        // Hotkeys Footer
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 122, BackColor = BgCard, Padding = new Padding(16, 10, 16, 10) };
+        // Hotkeys & Settings Footer
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 208, BackColor = BgCard, Padding = new Padding(16, 10, 16, 10) };
         var hkHeader = new Label
         {
             Text = "GLOBAL HOTKEYS (CLICK TO REBIND)",
@@ -171,6 +203,35 @@ public sealed class MainForm : Form
         _btnCardHk = AddHotKeyRow(footer, "Cycle Cards", _config.CardHotKey.Format(), 34, "card");
         _btnOutHk = AddHotKeyRow(footer, "Cycle Output", _config.OutputHotKey.Format(), 62, "output");
         _btnInHk = AddHotKeyRow(footer, "Cycle Input", _config.InputHotKey.Format(), 90, "input");
+        _btnMuteHk = AddHotKeyRow(footer, "Toggle Mic Mute", _config.MuteHotKey.Format(), 118, "mute");
+
+        var divider = new Panel { BackColor = BgBorder, Size = new Size(338, 1), Location = new Point(16, 148) };
+
+        var chimeChk = new CheckBox
+        {
+            Text = "Play confirmation chime on switch",
+            Font = new Font("Segoe UI", 8.5f),
+            ForeColor = TextMuted,
+            AutoSize = true,
+            Location = new Point(16, 156),
+            Cursor = Cursors.Hand,
+            Checked = _config.ChimeEnabled
+        };
+        chimeChk.CheckedChanged += (_, _) => { _config.ChimeEnabled = chimeChk.Checked; SaveConfig(); };
+
+        var startupChk = new CheckBox
+        {
+            Text = "Start with Windows (minimized to tray)",
+            Font = new Font("Segoe UI", 8.5f),
+            ForeColor = TextMuted,
+            AutoSize = true,
+            Location = new Point(16, 180),
+            Cursor = Cursors.Hand,
+            Checked = IsStartupEnabled()
+        };
+        startupChk.CheckedChanged += (_, _) => SetStartup(startupChk.Checked);
+
+        footer.Controls.AddRange(new Control[] { divider, chimeChk, startupChk });
 
         Controls.Add(_cardsPanel);
         Controls.Add(actionBar);
@@ -180,6 +241,8 @@ public sealed class MainForm : Form
         // Tray Icon
         var trayMenu = new ContextMenuStrip();
         trayMenu.Items.Add("Open AudioSwitcher", null, (_, _) => ShowFromTray());
+        trayMenu.Items.Add("Toggle Mic Mute", null, (_, _) => ToggleMicMute());
+        trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add("Exit", null, (_, _) => { _allowClose = true; Close(); });
 
         _trayIcon = new NotifyIcon
@@ -192,10 +255,45 @@ public sealed class MainForm : Form
         _trayIcon.Click += (_, e) => { if (e is MouseEventArgs me && me.Button == MouseButtons.Left) ShowFromTray(); };
 
         // Global Hotkeys
-        _hotKeys = new HotKeyManager(CycleCard, CycleOutput, CycleInput);
+        _hotKeys = new HotKeyManager(CycleCard, CycleOutput, CycleInput, ToggleMicMute);
         RegisterAllHotKeys();
 
+        SyncMuteBanner();
         RenderCards();
+    }
+
+    protected override void SetVisibleCore(bool value)
+    {
+        if (_startMinimized && !IsHandleCreated)
+        {
+            CreateHandle();
+            base.SetVisibleCore(false);
+            return;
+        }
+        base.SetVisibleCore(value);
+    }
+
+    private static bool IsStartupEnabled()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, false);
+        return key?.GetValue(AppRegName) != null;
+    }
+
+    private static void SetStartup(bool enable)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
+        if (key == null) return;
+
+        if (enable)
+        {
+            var exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+                key.SetValue(AppRegName, $"\"{exePath}\" --minimized");
+        }
+        else
+        {
+            key.DeleteValue(AppRegName, false);
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -214,6 +312,8 @@ public sealed class MainForm : Form
             return;
         }
         _hotKeys.Dispose();
+        _osd.Close();
+        _muteBanner.Close();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         base.OnFormClosing(e);
@@ -237,12 +337,13 @@ public sealed class MainForm : Form
             if (e.Control) mods |= 0x0002;
             if (e.Shift) mods |= 0x0004;
             if (e.Alt) mods |= 0x0001;
-            if (mods == 0) mods = 0x0002 | 0x0004; // fallback to Ctrl+Shift if no modifier pressed
+            if (mods == 0) mods = 0x0002 | 0x0004;
 
             var binding = new HotKeyBinding { Modifiers = mods, Key = e.KeyCode };
             if (_capturingHotKeyTarget == "card") _config.CardHotKey = binding;
             else if (_capturingHotKeyTarget == "output") _config.OutputHotKey = binding;
             else if (_capturingHotKeyTarget == "input") _config.InputHotKey = binding;
+            else if (_capturingHotKeyTarget == "mute") _config.MuteHotKey = binding;
 
             _capturingHotKeyTarget = null;
             SaveConfig();
@@ -310,11 +411,12 @@ public sealed class MainForm : Form
         _btnCardHk.Text = _config.CardHotKey.Format(); _btnCardHk.ForeColor = TextPrimary;
         _btnOutHk.Text = _config.OutputHotKey.Format(); _btnOutHk.ForeColor = TextPrimary;
         _btnInHk.Text = _config.InputHotKey.Format(); _btnInHk.ForeColor = TextPrimary;
+        _btnMuteHk.Text = _config.MuteHotKey.Format(); _btnMuteHk.ForeColor = TextPrimary;
     }
 
     private void RegisterAllHotKeys()
     {
-        _hotKeys.Register(_config.CardHotKey, _config.OutputHotKey, _config.InputHotKey);
+        _hotKeys.Register(_config.CardHotKey, _config.OutputHotKey, _config.InputHotKey, _config.MuteHotKey);
     }
 
     private void RenderCards()
@@ -513,6 +615,71 @@ public sealed class MainForm : Form
         dlg.ShowDialog(this);
     }
 
+    private void OpenDeviceFilterDialog()
+    {
+        var outputs = _audio.GetPlaybackDevices(DeviceState.Active).ToList();
+        var inputs = _audio.GetCaptureDevices(DeviceState.Active).ToList();
+
+        using var dlg = new Form
+        {
+            Text = "Cycle Device Filter",
+            Size = new Size(360, 410),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            BackColor = BgMain,
+            ForeColor = TextPrimary,
+            MaximizeBox = false,
+            MinimizeBox = false
+        };
+
+        var outLbl = new Label { Text = "Include in Cycle Output (leave all unchecked for all):", Location = new Point(16, 12), AutoSize = true, ForeColor = TextMuted };
+        var outList = new CheckedListBox
+        {
+            Location = new Point(16, 32),
+            Size = new Size(312, 130),
+            BackColor = BgCard,
+            ForeColor = TextPrimary,
+            BorderStyle = BorderStyle.FixedSingle,
+            CheckOnClick = true
+        };
+        foreach (var d in outputs)
+            outList.Items.Add(new DeviceItem(d.Id, d.FullName), _config.CycleOutputIds.Contains(d.Id));
+
+        var inLbl = new Label { Text = "Include in Cycle Input (leave all unchecked for all):", Location = new Point(16, 174), AutoSize = true, ForeColor = TextMuted };
+        var inList = new CheckedListBox
+        {
+            Location = new Point(16, 194),
+            Size = new Size(312, 120),
+            BackColor = BgCard,
+            ForeColor = TextPrimary,
+            BorderStyle = BorderStyle.FixedSingle,
+            CheckOnClick = true
+        };
+        foreach (var d in inputs)
+            inList.Items.Add(new DeviceItem(d.Id, d.FullName), _config.CycleInputIds.Contains(d.Id));
+
+        var saveBtn = new Button
+        {
+            Text = "Save Filter",
+            BackColor = Accent,
+            ForeColor = TextPrimary,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(100, 30),
+            Location = new Point(228, 326)
+        };
+        saveBtn.FlatAppearance.BorderSize = 0;
+        saveBtn.Click += (_, _) =>
+        {
+            _config.CycleOutputIds = outList.CheckedItems.Cast<DeviceItem>().Select(x => x.Id).ToList();
+            _config.CycleInputIds = inList.CheckedItems.Cast<DeviceItem>().Select(x => x.Id).ToList();
+            SaveConfig();
+            dlg.DialogResult = DialogResult.OK;
+        };
+
+        dlg.Controls.AddRange(new Control[] { outLbl, outList, inLbl, inList, saveBtn });
+        dlg.ShowDialog(this);
+    }
+
     private void ActivateCard(AudioCard card)
     {
         if (card.OutputId.HasValue)
@@ -531,7 +698,8 @@ public sealed class MainForm : Form
         _config.ActiveCardId = card.Id;
         SaveConfig();
         RenderCards();
-        Notify($"Card: {card.Name}");
+        SyncMuteBanner();
+        ShowFeedback("CARD ACTIVE", card.Name, Accent, playChime: true);
     }
 
     private void CycleCard()
@@ -544,32 +712,62 @@ public sealed class MainForm : Form
 
     private void CycleOutput()
     {
-        var devices = _audio.GetPlaybackDevices(DeviceState.Active).ToList();
+        var all = _audio.GetPlaybackDevices(DeviceState.Active).ToList();
+        var devices = _config.CycleOutputIds.Count > 0
+            ? all.Where(d => _config.CycleOutputIds.Contains(d.Id)).ToList()
+            : all;
+
         if (devices.Count < 2) return;
         var current = _audio.DefaultPlaybackDevice;
         var idx = current != null ? devices.FindIndex(d => d.Id == current.Id) : -1;
         var next = devices[(idx + 1) % devices.Count];
         next.SetAsDefault();
         next.SetAsDefaultCommunications();
-        Notify($"Output: {next.FullName}");
+        ShowFeedback("OUTPUT", next.FullName, Accent, playChime: true);
     }
 
     private void CycleInput()
     {
-        var devices = _audio.GetCaptureDevices(DeviceState.Active).ToList();
+        var all = _audio.GetCaptureDevices(DeviceState.Active).ToList();
+        var devices = _config.CycleInputIds.Count > 0
+            ? all.Where(d => _config.CycleInputIds.Contains(d.Id)).ToList()
+            : all;
+
         if (devices.Count < 2) return;
         var current = _audio.DefaultCaptureDevice;
         var idx = current != null ? devices.FindIndex(d => d.Id == current.Id) : -1;
         var next = devices[(idx + 1) % devices.Count];
         next.SetAsDefault();
         next.SetAsDefaultCommunications();
-        Notify($"Input: {next.FullName}");
+        SyncMuteBanner();
+        ShowFeedback("INPUT", next.FullName, Accent, playChime: false);
     }
 
-    private void Notify(string message)
+    private void ToggleMicMute()
     {
-        _statusLabel.Text = message;
-        _trayIcon.ShowBalloonTip(1200, "AudioSwitcher", message, ToolTipIcon.Info);
+        var mic = _audio.DefaultCaptureDevice;
+        if (mic == null) return;
+        bool nowMuted = !mic.IsMuted;
+        mic.Mute(nowMuted);
+        SyncMuteBanner();
+        ShowFeedback("MICROPHONE", nowMuted ? "Muted" : "Live (Unmuted)", nowMuted ? Danger : Color.FromArgb(35, 165, 89), playChime: false);
+    }
+
+    private void SyncMuteBanner()
+    {
+        var mic = _audio.DefaultCaptureDevice;
+        if (mic != null && mic.IsMuted)
+            _muteBanner.ShowBanner();
+        else
+            _muteBanner.Hide();
+    }
+
+    private void ShowFeedback(string category, string title, Color accentColor, bool playChime)
+    {
+        _statusLabel.Text = $"{category}: {title}";
+        _osd.ShowMessage(category, title, accentColor);
+        if (playChime && _config.ChimeEnabled)
+            ChimePlayer.PlayAsync();
     }
 
     private void HideToTray() { Hide(); }
@@ -594,28 +792,208 @@ public sealed class MainForm : Form
     private record DeviceItem(Guid Id, string Name) { public override string ToString() => Name; }
 }
 
+public sealed class OsdBannerForm : Form
+{
+    private readonly System.Windows.Forms.Timer _timer;
+    private readonly Label _catLbl;
+    private readonly Label _msgLbl;
+    private Color _accent = Color.FromArgb(88, 101, 242);
+
+    public OsdBannerForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        Size = new Size(320, 60);
+        BackColor = Color.FromArgb(20, 22, 27);
+        Opacity = 0.94;
+        DoubleBuffered = true;
+
+        _catLbl = new Label
+        {
+            Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(148, 155, 168),
+            Location = new Point(16, 10),
+            Size = new Size(288, 16)
+        };
+        _msgLbl = new Label
+        {
+            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(242, 244, 248),
+            Location = new Point(16, 28),
+            Size = new Size(288, 22),
+            AutoEllipsis = true
+        };
+        Controls.AddRange(new Control[] { _catLbl, _msgLbl });
+
+        _timer = new System.Windows.Forms.Timer { Interval = 1600 };
+        _timer.Tick += (_, _) => { _timer.Stop(); Hide(); };
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000020 | 0x00000008; // NOACTIVATE | TOOLWINDOW | TRANSPARENT | TOPMOST
+            return cp;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var border = new Pen(Color.FromArgb(46, 50, 60), 1);
+        e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        using var bar = new SolidBrush(_accent);
+        e.Graphics.FillRectangle(bar, 0, 0, 4, Height);
+    }
+
+    public void ShowMessage(string category, string message, Color accentColor)
+    {
+        _accent = accentColor;
+        _catLbl.Text = category;
+        _msgLbl.Text = message;
+        var screen = Screen.PrimaryScreen!.WorkingArea;
+        Location = new Point(screen.Left + (screen.Width - Width) / 2, screen.Bottom - Height - 36);
+        Invalidate();
+        if (!Visible) Show();
+        _timer.Stop();
+        _timer.Start();
+    }
+}
+
+public sealed class MuteBannerForm : Form
+{
+    public MuteBannerForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        Size = new Size(124, 30);
+        BackColor = Color.FromArgb(32, 18, 20);
+        Opacity = 0.92;
+        DoubleBuffered = true;
+
+        var lbl = new Label
+        {
+            Text = "● MIC MUTED",
+            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(245, 90, 93),
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+        Controls.Add(lbl);
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000020 | 0x00000008;
+            return cp;
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var border = new Pen(Color.FromArgb(237, 66, 69), 1);
+        e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+    }
+
+    public void ShowBanner()
+    {
+        var screen = Screen.PrimaryScreen!.WorkingArea;
+        Location = new Point(screen.Left + (screen.Width - Width) / 2, screen.Top + 14);
+        if (!Visible) Show();
+    }
+}
+
+public static class ChimePlayer
+{
+    private static readonly byte[] ChimeWav = GenerateSoftChime();
+
+    public static void PlayAsync()
+    {
+        Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(120); // allow Windows to finish routing the new default output
+                using var ms = new MemoryStream(ChimeWav);
+                using var player = new SoundPlayer(ms);
+                player.PlaySync();
+            }
+            catch { }
+        });
+    }
+
+    private static byte[] GenerateSoftChime()
+    {
+        const int sampleRate = 44100;
+        const double durationSec = 0.16;
+        int sampleCount = (int)(sampleRate * durationSec);
+        int dataSize = sampleCount * 2;
+
+        using var ms = new MemoryStream(44 + dataSize);
+        using var bw = new BinaryWriter(ms);
+
+        bw.Write("RIFF"u8);
+        bw.Write(36 + dataSize);
+        bw.Write("WAVE"u8);
+        bw.Write("fmt "u8);
+        bw.Write(16);
+        bw.Write((short)1); // PCM
+        bw.Write((short)1); // Mono
+        bw.Write(sampleRate);
+        bw.Write(sampleRate * 2);
+        bw.Write((short)2);
+        bw.Write((short)16);
+        bw.Write("data"u8);
+        bw.Write(dataSize);
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double t = (double)i / sampleRate;
+            double env = Math.Sin(Math.PI * (i / (double)sampleCount)); // smooth fade in/out
+            double freq = t < 0.08 ? 660.0 : 880.0; // gentle two-note chime (E5 -> A5)
+            short sample = (short)(Math.Sin(2.0 * Math.PI * freq * t) * env * 6000);
+            bw.Write(sample);
+        }
+
+        return ms.ToArray();
+    }
+}
+
 public sealed class HotKeyManager : NativeWindow, IDisposable
 {
     private const int WM_HOTKEY = 0x0312;
-    private readonly Action _onCard, _onOutput, _onInput;
+    private readonly Action _onCard, _onOutput, _onInput, _onMute;
 
     [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
     [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-    public HotKeyManager(Action onCard, Action onOutput, Action onInput)
+    public HotKeyManager(Action onCard, Action onOutput, Action onInput, Action onMute)
     {
-        _onCard = onCard; _onOutput = onOutput; _onInput = onInput;
+        _onCard = onCard; _onOutput = onOutput; _onInput = onInput; _onMute = onMute;
         CreateHandle(new CreateParams());
     }
 
-    public void Register(HotKeyBinding card, HotKeyBinding output, HotKeyBinding input)
+    public void Register(HotKeyBinding card, HotKeyBinding output, HotKeyBinding input, HotKeyBinding mute)
     {
-        UnregisterHotKey(Handle, 1);
-        UnregisterHotKey(Handle, 2);
-        UnregisterHotKey(Handle, 3);
+        for (int i = 1; i <= 4; i++) UnregisterHotKey(Handle, i);
         RegisterHotKey(Handle, 1, card.Modifiers, (uint)card.Key);
         RegisterHotKey(Handle, 2, output.Modifiers, (uint)output.Key);
         RegisterHotKey(Handle, 3, input.Modifiers, (uint)input.Key);
+        RegisterHotKey(Handle, 4, mute.Modifiers, (uint)mute.Key);
     }
 
     protected override void WndProc(ref Message m)
@@ -627,6 +1005,7 @@ public sealed class HotKeyManager : NativeWindow, IDisposable
                 case 1: _onCard(); break;
                 case 2: _onOutput(); break;
                 case 3: _onInput(); break;
+                case 4: _onMute(); break;
             }
         }
         base.WndProc(ref m);
@@ -634,9 +1013,7 @@ public sealed class HotKeyManager : NativeWindow, IDisposable
 
     public void Dispose()
     {
-        UnregisterHotKey(Handle, 1);
-        UnregisterHotKey(Handle, 2);
-        UnregisterHotKey(Handle, 3);
+        for (int i = 1; i <= 4; i++) UnregisterHotKey(Handle, i);
         DestroyHandle();
     }
 }
