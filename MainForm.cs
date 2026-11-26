@@ -907,6 +907,13 @@ public sealed class MainForm : Form
 
         try
         {
+            var info = new FileInfo(ofd.FileName);
+            if (info.Length > ProfileLogic.MaxProfileJsonBytes)
+            {
+                SetStatus($"Import failed: file exceeds {ProfileLogic.MaxProfileJsonBytes / 1024} KB limit", true);
+                return;
+            }
+
             var json = File.ReadAllText(ofd.FileName);
             var (addedCards, addedFilters) = ProfileLogic.ImportProfilesJson(json, _config, _snap);
             Save();
@@ -945,7 +952,8 @@ public sealed class MainForm : Form
 
             if (answer == DialogResult.Yes)
             {
-                Process.Start(new ProcessStartInfo { FileName = res.ReleaseUrl, UseShellExecute = true });
+                string safeUrl = ProfileLogic.SanitizeReleaseUrl(res.ReleaseUrl);
+                Process.Start(new ProcessStartInfo { FileName = safeUrl, UseShellExecute = true });
             }
         }
         catch (Exception ex)

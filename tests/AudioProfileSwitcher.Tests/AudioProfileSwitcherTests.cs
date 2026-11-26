@@ -499,4 +499,56 @@ public sealed class AudioProfileSwitcherTests
         var same = ProfileLogic.ParseLatestRelease(newerJson, "1.4.0");
         Assert.False(same.UpdateAvailable);
     }
+
+    [Theory]
+    [InlineData("file:///C:/Windows/System32/notepad.exe")]
+    [InlineData("http://github.com/chryow/AudioProfileSwitcher/releases/tag/v2.0.0")]
+    [InlineData("https://evil.example/chryow/AudioProfileSwitcher/releases/tag/v2.0.0")]
+    [InlineData("https://github.com/other/repo/releases/tag/v2.0.0")]
+    [InlineData("https://user@github.com/chryow/AudioProfileSwitcher/releases/tag/v2.0.0")]
+    [InlineData("https://github.com:8443/chryow/AudioProfileSwitcher/releases/tag/v2.0.0")]
+    [InlineData("ms-msdt:/id")]
+    public void SanitizeReleaseUrl_RejectsUnsafeSchemesHostsAndPaths(string unsafeUrl)
+    {
+        Assert.Equal(AppInfo.ReleasesPageUrl, ProfileLogic.SanitizeReleaseUrl(unsafeUrl));
+
+        string json = $$"""{"tag_name":"v9.0.0","html_url":"{{unsafeUrl}}"}""";
+        var parsed = ProfileLogic.ParseLatestRelease(json, "1.4.1");
+        Assert.Equal(AppInfo.ReleasesPageUrl, parsed.ReleaseUrl);
+    }
+
+    [Fact]
+    public void ImportProfilesJson_EnforcesLimitsAndSanitizesNames()
+    {
+        // 1. Oversized payload rejected before deserialization:
+        string huge = new string('a', ProfileLogic.MaxProfileJsonBytes + 16);
+        Assert.Throws<InvalidDataException>(() => ProfileLogic.ImportProfilesJson(huge, new AppConfig()));
+
+        // 2. Excess card count rejected:
+        var tooMany = new AppConfig();
+        for (int i = 0; i < ProfileLogic.MaxImportedCards + 1; i++)
+            tooMany.Cards.Add(new AudioCard { Name = $"Card {i}" });
+        string tooManyJson = ProfileLogic.ExportProfilesJson(tooMany);
+        Assert.Throws<InvalidDataException>(() => ProfileLogic.ImportProfilesJson(tooManyJson, new AppConfig()));
+
+        // 3. Control characters stripped and long names truncated:
+        var dirty = new AppConfig
+        {
+            Cards =
+            {
+                new AudioCard
+                {
+                    Name = "Desk\r\n\0" + new string('X', 200),
+                    OutputName = "Speakers\t(DAC)\n"
+                }
+            }
+        };
+        var dest = new AppConfig();
+        ProfileLogic.ImportProfilesJson(ProfileLogic.ExportProfilesJson(dirty), dest);
+        Assert.Single(dest.Cards);
+        Assert.Equal(ProfileLogic.MaxNameLength, dest.Cards[0].Name.Length);
+        Assert.DoesNotContain("\r", dest.Cards[0].Name);
+        Assert.DoesNotContain("\n", dest.Cards[0].Name);
+        Assert.Equal("Speakers(DAC)", dest.Cards[0].OutputName);
+    }
 }
