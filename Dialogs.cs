@@ -25,16 +25,14 @@ internal abstract class DarkDialog : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        Native.DarkTitleBar(Handle);
-        Native.RoundCorners(Handle);
-        Native.SetBorderColor(Handle, Theme.BgBorderStrong);
+        Native.EditorialDialogChrome(Handle);
     }
 
     protected static Label MakeLabel(string text, Point location) =>
-        new() { Text = text, Location = location, AutoSize = true, Font = Theme.SmallBold, ForeColor = Theme.TextMuted };
+        new() { Text = text.ToUpperInvariant(), Location = location, AutoSize = true, Font = Theme.MonoSmallBold, ForeColor = Theme.Graphite };
 
     protected static ModernButton MakeButton(string text, Point location, bool primary, int width = 104) =>
-        new(primary ? ModernButtonKind.Primary : ModernButtonKind.Secondary)
+        new(primary ? ModernButtonKind.AccentPrimary : ModernButtonKind.Secondary)
         {
             Text = text,
             Size = new Size(width, 32),
@@ -84,7 +82,7 @@ internal sealed class CardEditorDialog : DarkDialog
         {
             Location = new Point(18, 72),
             Size = new Size(340, 28),
-            BackColor = Theme.BgMain,
+            BackColor = Theme.Paper,
             WrapContents = false,
             Margin = Padding.Empty
         };
@@ -94,13 +92,13 @@ internal sealed class CardEditorDialog : DarkDialog
         Fill(_out, outputs, card.OutputId, card.OutputName, "(Don't change)");
 
         int initialOutVol = card.OutputVolume ?? (SelectedOutput?.CurrentVolume ?? 80);
-        _outVolToggle = new ToggleSwitch { Location = new Point(18, 162), Checked = card.OutputVolume.HasValue };
+        _outVolToggle = new ToggleSwitch { Location = new Point(18, 163), Checked = card.OutputVolume.HasValue };
         var outVolCap = new Label
         {
             Text = "Output volume",
-            Location = new Point(68, 165),
+            Location = new Point(64, 165),
             AutoSize = true,
-            ForeColor = Theme.TextSoft
+            ForeColor = Theme.Ink
         };
         _outVolSlider = new DarkSlider
         {
@@ -113,9 +111,9 @@ internal sealed class CardEditorDialog : DarkDialog
         {
             Location = new Point(316, 163),
             Size = new Size(42, 20),
-            Font = Theme.SmallBold,
+            Font = Theme.MonoBold,
             TextAlign = ContentAlignment.MiddleRight,
-            ForeColor = Theme.TextSoft
+            ForeColor = Theme.Graphite
         };
         _outVolToggle.CheckedChanged += (_, _) =>
         {
@@ -133,13 +131,13 @@ internal sealed class CardEditorDialog : DarkDialog
         Fill(_in, inputs, card.InputId, card.InputName, "(Don't change)");
 
         int initialInVol = card.InputVolume ?? (SelectedInput?.CurrentVolume ?? 100);
-        _inVolToggle = new ToggleSwitch { Location = new Point(18, 314), Checked = card.InputVolume.HasValue };
+        _inVolToggle = new ToggleSwitch { Location = new Point(18, 315), Checked = card.InputVolume.HasValue };
         var inVolCap = new Label
         {
             Text = "Input volume",
-            Location = new Point(68, 317),
+            Location = new Point(64, 317),
             AutoSize = true,
-            ForeColor = Theme.TextSoft
+            ForeColor = Theme.Ink
         };
         _inVolSlider = new DarkSlider
         {
@@ -152,9 +150,9 @@ internal sealed class CardEditorDialog : DarkDialog
         {
             Location = new Point(316, 315),
             Size = new Size(42, 20),
-            Font = Theme.SmallBold,
+            Font = Theme.MonoBold,
             TextAlign = ContentAlignment.MiddleRight,
-            ForeColor = Theme.TextSoft
+            ForeColor = Theme.Graphite
         };
         _inVolToggle.CheckedChanged += (_, _) =>
         {
@@ -163,21 +161,21 @@ internal sealed class CardEditorDialog : DarkDialog
         };
         _inVolSlider.ValueChanged += (_, _) => UpdateVolumeLabels();
 
-        // Auto-activate section pill
+        // Auto-activate section sheet
         var autoCard = new SectionCard
         {
             Location = new Point(18, 358),
             Size = new Size(340, 56),
             Padding = Padding.Empty
         };
-        _auto = new ToggleSwitch { Location = new Point(14, 17), Checked = card.AutoActivate };
+        _auto = new ToggleSwitch { Location = new Point(14, 18), Checked = card.AutoActivate };
         var autoLbl = new Label
         {
             Text = "Auto-switch to this card when one of its devices connects",
-            Location = new Point(66, 10),
-            Size = new Size(262, 36),
-            BackColor = Theme.BgSurface,
-            ForeColor = Theme.TextSoft
+            Location = new Point(62, 10),
+            Size = new Size(266, 36),
+            BackColor = Theme.Sheet,
+            ForeColor = Theme.Ink
         };
         autoCard.Controls.Add(_auto);
         autoCard.Controls.Add(autoLbl);
@@ -239,10 +237,10 @@ internal sealed class CardEditorDialog : DarkDialog
 
     private void UpdateVolumeLabels()
     {
-        _outVolValueLbl.Text = _outVolToggle.Checked ? $"{_outVolSlider.Value}%" : "Keep";
-        _outVolValueLbl.ForeColor = _outVolToggle.Checked ? Theme.AccentEnd : Theme.TextMuted;
-        _inVolValueLbl.Text = _inVolToggle.Checked ? $"{_inVolSlider.Value}%" : "Keep";
-        _inVolValueLbl.ForeColor = _inVolToggle.Checked ? Theme.AccentEnd : Theme.TextMuted;
+        _outVolValueLbl.Text = _outVolToggle.Checked ? $"{_outVolSlider.Value}%" : "KEEP";
+        _outVolValueLbl.ForeColor = _outVolToggle.Checked ? Theme.Ink : Theme.Graphite;
+        _inVolValueLbl.Text = _inVolToggle.Checked ? $"{_inVolSlider.Value}%" : "KEEP";
+        _inVolValueLbl.ForeColor = _inVolToggle.Checked ? Theme.Ink : Theme.Graphite;
     }
 
     private void RefreshNameSuggestions(bool autoUpdateName)
@@ -268,12 +266,12 @@ internal sealed class CardEditorDialog : DarkDialog
         foreach (var suggestion in ProfileLogic.SuggestCardNames(outName, inName, commName))
         {
             var s = suggestion;
-            var measured = TextRenderer.MeasureText(s, Theme.Small);
+            var measured = TextRenderer.MeasureText(s, Theme.MonoSmall);
             var chip = new ModernButton(ModernButtonKind.Chip)
             {
                 Text = s,
-                Size = new Size(Math.Clamp(measured.Width + 16, 48, 160), 24),
-                Margin = new Padding(0, 0, 6, 0)
+                Size = new Size(Math.Clamp(measured.Width + 14, 48, 160), 22),
+                Margin = new Padding(0, 2, 6, 0)
             };
             chip.Click += (_, _) =>
             {
@@ -463,34 +461,34 @@ internal sealed class UpdateDialog : DarkDialog
         {
             Location = new Point(18, 16),
             Size = new Size(34, 34),
-            BackColor = Theme.BgMain
+            BackColor = Theme.Paper
         };
         emblem.Paint += (_, e) =>
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Theme.ConfigureGraphics(e.Graphics);
             Gfx.DrawAppEmblem(e.Graphics, new RectangleF(1, 1, 32, 32));
         };
 
         var titleLbl = new Label
         {
             Text = $"AudioProfileSwitcher {release.LatestVersion} is available",
-            Location = new Point(62, 15),
-            Size = new Size(340, 20),
+            Location = new Point(62, 14),
+            Size = new Size(340, 22),
             Font = Theme.Header,
-            ForeColor = Theme.TextPrimary,
+            ForeColor = Theme.Ink,
             AutoEllipsis = true
         };
 
         string sizePart = release.AssetSizeBytes > 0
-            ? $"  ·  {ProfileLogic.FormatByteSize(release.AssetSizeBytes)}"
+            ? $" · {ProfileLogic.FormatByteSize(release.AssetSizeBytes)}"
             : "";
         var subLbl = new Label
         {
-            Text = $"Installed: v{AppInfo.Version}  ·  {AppInfo.BuildFlavorLabel} build{sizePart}",
-            Location = new Point(62, 36),
-            Size = new Size(340, 18),
-            Font = Theme.Small,
-            ForeColor = Theme.TextMuted,
+            Text = $"INSTALLED v{AppInfo.Version} · {AppInfo.BuildFlavorLabel.ToUpperInvariant()}{sizePart}",
+            Location = new Point(62, 37),
+            Size = new Size(340, 16),
+            Font = Theme.MonoSmall,
+            ForeColor = Theme.Graphite,
             AutoEllipsis = true
         };
 
@@ -507,8 +505,8 @@ internal sealed class UpdateDialog : DarkDialog
             ReadOnly = true,
             BorderStyle = BorderStyle.None,
             ScrollBars = ScrollBars.Vertical,
-            BackColor = Theme.BgSurface,
-            ForeColor = Theme.TextSoft,
+            BackColor = Theme.Sheet,
+            ForeColor = Theme.Ink,
             Font = Theme.Body,
             TabStop = false,
             Text = string.IsNullOrWhiteSpace(release.ReleaseNotes)
@@ -522,17 +520,17 @@ internal sealed class UpdateDialog : DarkDialog
         if (_canSelfUpdate)
         {
             initialStatus = "Verified via SHA-256 checksum. Settings and profiles are preserved.";
-            initialColor = Theme.TextMuted;
+            initialColor = Theme.Graphite;
         }
         else if (!envAllowsSelfUpdate)
         {
             initialStatus = envReason ?? "Automatic update isn't available for this installation.";
-            initialColor = Theme.Warning;
+            initialColor = Theme.Vermilion;
         }
         else
         {
             initialStatus = "This release doesn't include a verified single-file asset for automatic install. Download manually on GitHub.";
-            initialColor = Theme.Warning;
+            initialColor = Theme.Vermilion;
         }
 
         _statusLbl = new Label
@@ -547,7 +545,7 @@ internal sealed class UpdateDialog : DarkDialog
         _progressBar = new DarkProgressBar
         {
             Location = new Point(18, 298),
-            Size = new Size(384, 10),
+            Size = new Size(384, 8),
             Visible = false
         };
 

@@ -84,16 +84,6 @@ public sealed class MainForm : Form
         public override string ToString() => Label;
     }
 
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW for crisp depth on Windows 10 & 11
-            return cp;
-        }
-    }
-
     public MainForm(bool startMinimized = false, string? updatedToVersion = null)
     {
         _startMinimized = startMinimized;
@@ -107,74 +97,81 @@ public sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "AudioSwitcher";
         Icon = TrayIcons.AppWindow;
-        MinimumSize = new Size(396, 440);
-        MaximumSize = new Size(396, 1400);
-        Size = new Size(396, ProfileLogic.ClampWindowHeight(_config.WindowHeight, 440, 1400, 648));
+        MinimumSize = new Size(408, 440);
+        MaximumSize = new Size(408, 1400);
+        Size = new Size(408, ProfileLogic.ClampWindowHeight(_config.WindowHeight, 440, 1400, 648));
         FormBorderStyle = FormBorderStyle.None;
         RestoreWindowLocation();
-        BackColor = Theme.BgMain;
-        ForeColor = Theme.TextPrimary;
+        BackColor = Theme.Paper;
+        ForeColor = Theme.Ink;
         Padding = new Padding(1);
         DoubleBuffered = true;
 
-        // ---- modern title bar with vector emblem + version / update & voice pills ----
-        var titleBar = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Theme.BgMain };
+        // ---- editorial paper title bar with 1px bottom rule, Georgia title & monospace tags ----
+        var titleBar = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = Theme.Paper };
         _titleBar = titleBar;
         titleBar.Paint += (_, e) =>
         {
             var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Theme.ConfigureGraphics(g);
             float k = Math.Max(1f, titleBar.DeviceDpi / 96f);
             int P(int v) => (int)Math.Round(v * k);
 
-            var emblem = new RectangleF(P(16), (titleBar.Height - P(22)) / 2f, P(22), P(22));
+            // Hairline rule separating title bar from ledger content
+            g.DrawLine(Theme.PenRule, 0, titleBar.Height - 1, titleBar.Width, titleBar.Height - 1);
+
+            var emblem = new RectangleF(P(14), (titleBar.Height - P(20)) / 2f, P(20), P(20));
             Gfx.DrawAppEmblem(g, emblem);
 
-            int titleX = P(46);
-            var titleRect = new Rectangle(titleX, 0, P(116), titleBar.Height);
-            TextRenderer.DrawText(g, "AudioSwitcher", Theme.Title, titleRect, Theme.TextPrimary,
+            int titleX = P(42);
+            var titleRect = new Rectangle(titleX, 0, P(130), titleBar.Height - 1);
+            TextRenderer.DrawText(g, "AudioSwitcher", Theme.Title, titleRect, Theme.Ink,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
             var measured = TextRenderer.MeasureText(g, "AudioSwitcher", Theme.Title);
-            int pillX = titleX + measured.Width + P(2);
-            int pillY = (titleBar.Height - P(18)) / 2;
+            int tagX = titleX + measured.Width + P(4);
+            int tagH = P(18);
+            int tagY = (titleBar.Height - 1 - tagH) / 2;
             Rectangle badgeRect;
 
             if (_availableUpdate is { UpdateAvailable: true } upd)
             {
-                string updLabel = $"↑ {upd.LatestVersion}";
-                int badgeW = Math.Clamp(TextRenderer.MeasureText(g, updLabel, Theme.MicroBold).Width + P(10), P(52), P(74));
-                badgeRect = new Rectangle(pillX, pillY, badgeW, P(18));
+                string updLabel = $"↑ {upd.LatestVersion.ToUpperInvariant()}";
+                int badgeW = Math.Clamp(TextRenderer.MeasureText(g, updLabel, Theme.MonoSmallBold).Width + P(10), P(56), P(78));
+                badgeRect = new Rectangle(tagX, tagY, badgeW, tagH);
                 _updatePillRect = badgeRect;
 
-                using var up = Gfx.RoundRect(badgeRect, P(9));
-                using (var ub = new SolidBrush(_updatePillHover ? Color.FromArgb(62, Theme.Success) : Theme.SuccessSoft))
-                    g.FillPath(ub, up);
-                using (var upen = new Pen(Color.FromArgb(_updatePillHover ? 220 : 140, Theme.Success), 1f))
-                    g.DrawPath(upen, up);
-                TextRenderer.DrawText(g, updLabel, Theme.MicroBold, badgeRect, Theme.Success,
+                Gfx.FillAndStrokeRect(
+                    g,
+                    badgeRect,
+                    1,
+                    _updatePillHover ? Theme.BrushPressedPaper : Theme.BrushSheet,
+                    Theme.PenFountainGreen);
+                TextRenderer.DrawText(g, updLabel, Theme.MonoSmallBold, badgeRect, Theme.FountainGreen,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             }
             else
             {
                 _updatePillRect = Rectangle.Empty;
-                badgeRect = new Rectangle(pillX, pillY, P(44), P(18));
-                using var vp = Gfx.RoundRect(badgeRect, P(9));
-                using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
-                TextRenderer.DrawText(g, $"v{AppInfo.Version}", Theme.MicroBold, badgeRect, Theme.AccentEnd,
+                string verLabel = $"V{AppInfo.Version}";
+                int verW = Math.Max(P(44), TextRenderer.MeasureText(g, verLabel, Theme.MonoSmall).Width + P(8));
+                badgeRect = new Rectangle(tagX, tagY, verW, tagH);
+                Gfx.FillAndStrokeRect(g, badgeRect, 1, Theme.BrushSheet, Theme.PenRule);
+                TextRenderer.DrawText(g, verLabel, Theme.MonoSmall, badgeRect, Theme.Graphite,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             }
 
             if (_voiceListening)
             {
-                var voiceRect = new Rectangle(badgeRect.Right + P(5), pillY, P(48), P(18));
-                int rightLimit = (_gearBtn?.Left ?? (titleBar.Width - P(112))) - P(4);
+                var voiceRect = new Rectangle(badgeRect.Right + P(5), tagY, P(52), tagH);
+                int rightLimit = (_gearBtn?.Left ?? (titleBar.Width - P(108))) - P(6);
                 if (voiceRect.Right < rightLimit)
                 {
-                    using var vcp = Gfx.RoundRect(voiceRect, P(9));
-                    using (var vcb = new SolidBrush(Theme.SuccessSoft)) g.FillPath(vcb, vcp);
-                    using (var vcpen = new Pen(Color.FromArgb(110, Theme.Success), 1f)) g.DrawPath(vcpen, vcp);
-                    TextRenderer.DrawText(g, "● VOICE", Theme.MicroBold, voiceRect, Theme.Success,
+                    Gfx.FillAndStrokeRect(g, voiceRect, 1, Theme.BrushSheet, Theme.PenFountainGreen);
+                    int sq = Math.Max(4, P(4));
+                    g.FillRectangle(Theme.BrushFountainGreen, voiceRect.X + P(5), voiceRect.Y + (voiceRect.Height - sq) / 2, sq, sq);
+                    var vTextR = new Rectangle(voiceRect.X + P(10), voiceRect.Y, voiceRect.Width - P(11), voiceRect.Height);
+                    TextRenderer.DrawText(g, "VOICE", Theme.MonoSmallBold, vTextR, Theme.FountainGreen,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
             }
@@ -217,7 +214,7 @@ public sealed class MainForm : Form
         titleBar.Controls.Add(minBtn);
         titleBar.Controls.Add(closeBtn);
 
-        // ---- elevated live "now" hero panel (clickable mic mute row) ----
+        // ---- printed ledger live "now" card (clickable mic mute row) ----
         _liveNow = new LiveNowPanel { Dock = DockStyle.Top, Height = 76 };
         _liveNow.MicMuteToggleRequested += () => _ = ToggleMicMuteAsync();
         _tip.SetToolTip(_liveNow, "Active audio devices · click the mic row to toggle mute");
@@ -226,25 +223,25 @@ public sealed class MainForm : Form
         var actionBar = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 46,
-            BackColor = Theme.BgMain,
-            Padding = new Padding(16, 6, 16, 6)
+            Height = 44,
+            BackColor = Theme.Paper,
+            Padding = new Padding(14, 6, 14, 6)
         };
         var addBtn = new ModernButton(ModernButtonKind.Primary)
         {
             Text = "+  New Card",
-            Size = new Size(116, 32),
-            Location = new Point(16, 7),
-            CornerRadius = 8
+            Size = new Size(108, 30),
+            Location = new Point(14, 7),
+            CornerRadius = 2
         };
         addBtn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
         var hintLbl = new Label
         {
-            Text = "Click to switch · right-click for menu",
-            Font = Theme.Small,
-            ForeColor = Theme.TextMuted,
+            Text = "CLICK TO SWITCH · RIGHT-CLICK MENU",
+            Font = Theme.MonoSmall,
+            ForeColor = Theme.Graphite,
             AutoSize = true,
-            Location = new Point(144, 15)
+            Location = new Point(132, 16)
         };
         actionBar.Controls.Add(addBtn);
         actionBar.Controls.Add(hintLbl);
@@ -256,8 +253,8 @@ public sealed class MainForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoScroll = true,
-            BackColor = Theme.BgMain,
-            Padding = new Padding(16, 4, 16, 10),
+            BackColor = Theme.Paper,
+            Padding = new Padding(14, 2, 14, 10),
             AllowDrop = true,
             Visible = false
         };
@@ -277,98 +274,102 @@ public sealed class MainForm : Form
         _cardsPanel.Paint += (_, e) =>
         {
             if (_dropLineY < 0) return;
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Theme.ConfigureGraphics(e.Graphics);
             int x1 = _cardsPanel.Padding.Left;
             int x2 = _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Right;
-            using var pen = new Pen(Theme.AccentEnd, 2.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            using var pen = new Pen(Theme.Vermilion, 2f);
             e.Graphics.DrawLine(pen, x1, _dropLineY, x2, _dropLineY);
         };
 
         _emptyPanel = BuildEmptyPanel();
         _settingsPanel = BuildSettingsPanel();
 
-        var content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.BgMain };
+        var content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Paper };
         content.Controls.Add(_cardsPanel);
         content.Controls.Add(_emptyPanel);
         content.Controls.Add(_settingsPanel);
 
-        // ---- sleek footer bar with live status dot & resize grip pill ----
+        // ---- Editorial E-Ink colophon footer strip (1px top rule, status left, CRAFTED BY CHRYOW + 5×5px vermilion square right) ----
         var footerBar = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 32,
-            BackColor = Theme.BgSurface
+            Height = 30,
+            BackColor = Theme.Paper
         };
         footerBar.Paint += (_, e) =>
         {
-            using var p = new Pen(Theme.BgBorder, 1f);
-            e.Graphics.DrawLine(p, 0, 0, footerBar.Width, 0);
+            e.Graphics.DrawLine(Theme.PenRule, 0, 0, footerBar.Width, 0);
         };
 
         _statusDot = new Panel
         {
             Dock = DockStyle.Left,
-            Width = 24,
-            BackColor = Theme.BgSurface
+            Width = 20,
+            BackColor = Theme.Paper
         };
         _statusDot.Paint += (_, e) =>
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            int d = 6;
+            Theme.ConfigureGraphics(e.Graphics);
+            int sq = 5;
             using var b = new SolidBrush(_statusDotColor);
-            e.Graphics.FillEllipse(b, 14, (_statusDot.Height - d) / 2, d, d);
+            e.Graphics.FillRectangle(b, 12, (_statusDot.Height - sq) / 2, sq, sq);
         };
 
-        var resizeGrip = new Panel
+        var colophon = new Panel
         {
             Dock = DockStyle.Right,
-            Width = 34,
-            BackColor = Theme.BgSurface,
+            Width = 148,
+            BackColor = Theme.Paper,
             Cursor = Cursors.SizeNS
         };
-        resizeGrip.Paint += (_, e) =>
+        colophon.Paint += (_, e) =>
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var p = new Pen(Theme.BgBorderStrong, 2f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            int cy = resizeGrip.Height / 2;
-            e.Graphics.DrawLine(p, 8, cy - 2, 22, cy - 2);
-            e.Graphics.DrawLine(p, 11, cy + 2, 19, cy + 2);
+            var g = e.Graphics;
+            Theme.ConfigureGraphics(g);
+            int sq = 5;
+            int sqX = colophon.Width - 12 - sq;
+            int sqY = (colophon.Height - sq) / 2;
+            g.FillRectangle(Theme.BrushVermilion, sqX, sqY, sq, sq);
+
+            var textRect = new Rectangle(0, 0, sqX - 6, colophon.Height);
+            TextRenderer.DrawText(g, "CRAFTED BY CHRYOW", Theme.MonoSmall, textRect, Theme.Graphite,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
         };
-        _tip.SetToolTip(resizeGrip, "Drag up or down to resize window height");
-        AttachVerticalResize(resizeGrip);
+        _tip.SetToolTip(colophon, "Drag up or down to resize window height");
+        AttachVerticalResize(colophon);
 
         _statusLabel = new Label
         {
             Dock = DockStyle.Fill,
-            Font = Theme.Small,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgSurface,
+            Font = Theme.MonoSmall,
+            ForeColor = Theme.Graphite,
+            BackColor = Theme.Paper,
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(2, 0, 4, 0),
             AutoEllipsis = true,
-            Text = "Ready"
+            Text = $"V{AppInfo.Version} · READY"
         };
         _statusTimer.Tick += (_, _) =>
         {
             _statusTimer.Stop();
-            _statusLabel.Text = "Ready";
-            _statusLabel.ForeColor = Theme.TextMuted;
-            _statusDotColor = Theme.Success;
+            _statusLabel.Text = $"V{AppInfo.Version} · READY";
+            _statusLabel.ForeColor = Theme.Graphite;
+            _statusDotColor = Theme.FountainGreen;
             _statusDot.Invalidate();
         };
 
         var bottomResizeStrip = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 4,
-            BackColor = Theme.BgSurface,
+            Height = 3,
+            BackColor = Theme.Paper,
             Cursor = Cursors.SizeNS
         };
         AttachVerticalResize(bottomResizeStrip);
 
         footerBar.Controls.Add(_statusLabel);
         footerBar.Controls.Add(_statusDot);
-        footerBar.Controls.Add(resizeGrip);
+        footerBar.Controls.Add(colophon);
         footerBar.Controls.Add(bottomResizeStrip);
 
         Controls.Add(content);
@@ -390,10 +391,10 @@ public sealed class MainForm : Form
         };
         _muteBanner.UnmuteRequested += () => _ = ToggleMicMuteAsync();
 
-        // ---- dark tray menu ----
+        // ---- Editorial E-Ink tray menu ----
         _trayMenu.Renderer = new DarkMenuRenderer();
-        _trayMenu.BackColor = Theme.BgCard;
-        _trayMenu.ForeColor = Theme.TextPrimary;
+        _trayMenu.BackColor = Theme.Paper;
+        _trayMenu.ForeColor = Theme.Ink;
         _trayMenu.Font = Theme.Body;
         _trayMenu.Opening += (_, _) => RebuildTrayMenu();
 
@@ -584,15 +585,14 @@ public sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        Native.RoundCorners(Handle);
-        Native.SetBorderColor(Handle, Theme.BgBorderStrong);
+        Native.CrispCorners(Handle);
+        Native.SetBorderColor(Handle, Theme.StrongBorder);
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        using var pen = new Pen(Theme.BgBorder, 1f);
-        e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        e.Graphics.DrawRectangle(Theme.PenInk, 0, 0, Width - 1, Height - 1);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -671,9 +671,9 @@ public sealed class MainForm : Form
 
     private void SetStatus(string text, bool warning)
     {
-        _statusLabel.Text = text;
-        _statusLabel.ForeColor = warning ? Theme.Warning : Theme.TextSoft;
-        _statusDotColor = warning ? Theme.Warning : Theme.AccentEnd;
+        _statusLabel.Text = text.ToUpperInvariant();
+        _statusLabel.ForeColor = warning ? Theme.Vermilion : Theme.Ink;
+        _statusDotColor = warning ? Theme.Vermilion : Theme.FountainGreen;
         _statusDot.Invalidate();
         _statusTimer.Stop();
         _statusTimer.Start();
@@ -689,8 +689,8 @@ public sealed class MainForm : Form
         {
             Text = glyph,
             Dock = DockStyle.Right,
-            Width = 38,
-            BackColor = Theme.BgMain
+            Width = 36,
+            BackColor = Theme.Paper
         };
         btn.Click += onClick;
         _tip.SetToolTip(btn, tip);
@@ -703,49 +703,59 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
-            BackColor = Theme.BgMain,
+            RowCount = 6,
+            BackColor = Theme.Paper,
             Visible = false
         };
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        t.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
+        t.RowStyles.Add(new RowStyle(SizeType.Percent, 26));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        t.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
+        t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        t.RowStyles.Add(new RowStyle(SizeType.Percent, 74));
 
-        var emblem = new Panel { Size = new Size(64, 64), BackColor = Theme.BgMain, Anchor = AnchorStyles.None, Margin = new Padding(0, 0, 0, 12) };
+        var emblem = new Panel { Size = new Size(48, 48), BackColor = Theme.Paper, Anchor = AnchorStyles.None, Margin = new Padding(0, 0, 0, 12) };
         emblem.Paint += (_, e) =>
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var halo = new SolidBrush(Theme.AccentSoft);
-            e.Graphics.FillEllipse(halo, 2, 2, 60, 60);
-            Gfx.DrawAppEmblem(e.Graphics, new RectangleF(10, 10, 44, 44));
+            Theme.ConfigureGraphics(e.Graphics);
+            Gfx.DrawAppEmblem(e.Graphics, new RectangleF(2, 2, 44, 44));
+        };
+
+        var heading = new Label
+        {
+            Text = "No profile cards yet",
+            Font = Theme.Header,
+            ForeColor = Theme.Ink,
+            AutoSize = true,
+            Anchor = AnchorStyles.None,
+            Margin = new Padding(0, 0, 0, 4)
         };
 
         var lbl = new Label
         {
-            Text = "No profile cards yet\nPair an output, microphone & volume so one click or hotkey switches everything.",
+            Text = "Pair an output, microphone & volume so one click or global hotkey switches everything.",
             Font = Theme.Body,
-            ForeColor = Theme.TextMuted,
+            ForeColor = Theme.Graphite,
             AutoSize = false,
-            Size = new Size(310, 66),
+            Size = new Size(310, 44),
             TextAlign = ContentAlignment.MiddleCenter,
             Anchor = AnchorStyles.None
         };
-        var btn = new ModernButton(ModernButtonKind.Primary)
+        var btn = new ModernButton(ModernButtonKind.AccentPrimary)
         {
             Text = "Create card from current devices",
-            Size = new Size(256, 38),
+            Size = new Size(256, 36),
             Anchor = AnchorStyles.None,
-            CornerRadius = 10,
-            Margin = new Padding(0, 8, 0, 0)
+            CornerRadius = 2,
+            Margin = new Padding(0, 10, 0, 0)
         };
         btn.Click += (_, _) => _ = OpenCardEditorAsync(NewCardFromCurrentDevices(), true);
 
         t.Controls.Add(emblem, 0, 1);
-        t.Controls.Add(lbl, 0, 2);
-        t.Controls.Add(btn, 0, 3);
+        t.Controls.Add(heading, 0, 2);
+        t.Controls.Add(lbl, 0, 3);
+        t.Controls.Add(btn, 0, 4);
         return t;
     }
 
@@ -898,9 +908,9 @@ public sealed class MainForm : Form
         _voiceConfValueLbl = new Label
         {
             Text = $"{_voiceConfSlider.Value}%",
-            Font = Theme.SmallBold,
-            ForeColor = Theme.AccentEnd,
-            BackColor = Theme.BgSurface,
+            Font = Theme.MonoBold,
+            ForeColor = Theme.Ink,
+            BackColor = Theme.Sheet,
             Location = new Point(108, 3),
             Size = new Size(38, 20),
             TextAlign = ContentAlignment.MiddleRight
@@ -919,10 +929,10 @@ public sealed class MainForm : Form
 
         _voiceStatusLbl = new Label
         {
-            Text = "Status: Disabled",
-            Font = Theme.SmallBold,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgSurface,
+            Text = "STATUS: DISABLED",
+            Font = Theme.MonoSmallBold,
+            ForeColor = Theme.Graphite,
+            BackColor = Theme.Sheet,
             AutoSize = false,
             Dock = DockStyle.Fill,
             Height = 20,
@@ -933,9 +943,9 @@ public sealed class MainForm : Form
 
         _voiceHintLbl = new Label
         {
-            Font = Theme.Small,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgSurface,
+            Font = Theme.MonoSmall,
+            ForeColor = Theme.Graphite,
+            BackColor = Theme.Sheet,
             AutoSize = false,
             Dock = DockStyle.Fill,
             Height = 46,
@@ -990,9 +1000,9 @@ public sealed class MainForm : Form
         var pathLbl = new Label
         {
             Text = $"Build: v{AppInfo.Version} ({AppInfo.BuildFlavorLabel})\nSettings: {_store.FilePath}\nLog: {AppLog.FilePath}",
-            Font = Theme.Small,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.BgSurface,
+            Font = Theme.MonoSmall,
+            ForeColor = Theme.Graphite,
+            BackColor = Theme.Sheet,
             AutoSize = false,
             Dock = DockStyle.Fill,
             Height = 60,
@@ -1018,7 +1028,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 2,
-            BackColor = Theme.BgSurface
+            BackColor = Theme.Sheet
         };
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 152));
@@ -1048,7 +1058,7 @@ public sealed class MainForm : Form
             ColumnCount = 2,
             RowCount = 1,
             Margin = new Padding(0, 6, 0, 0),
-            BackColor = Theme.BgSurface
+            BackColor = Theme.Sheet
         };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -1068,8 +1078,8 @@ public sealed class MainForm : Form
         {
             Text = text,
             Dock = DockStyle.Fill,
-            Height = 32,
-            CornerRadius = 8
+            Height = 30,
+            CornerRadius = 2
         };
         b.Click += onClick;
         return b;
@@ -1218,7 +1228,7 @@ public sealed class MainForm : Form
     {
         if (_availableUpdate is { UpdateAvailable: true } upd)
         {
-            _checkUpdateBtn.Kind = ModernButtonKind.Primary;
+            _checkUpdateBtn.Kind = ModernButtonKind.AccentPrimary;
             _checkUpdateBtn.Text = $"Install Update  ({upd.LatestVersion})";
         }
         else
@@ -1310,8 +1320,8 @@ public sealed class MainForm : Form
     {
         Text = text,
         Font = Theme.Body,
-        ForeColor = Theme.TextSoft,
-        BackColor = Theme.BgSurface,
+        ForeColor = Theme.Ink,
+        BackColor = Theme.Sheet,
         AutoSize = false,
         Dock = DockStyle.Fill,
         Height = height,
@@ -1322,16 +1332,17 @@ public sealed class MainForm : Form
     {
         var h = new Label
         {
-            Text = text,
-            Font = Theme.MicroBold,
-            ForeColor = Theme.AccentEnd,
-            BackColor = Theme.BgSurface,
+            Text = text.ToUpperInvariant(),
+            Font = Theme.MonoSmallBold,
+            ForeColor = Theme.Graphite,
+            BackColor = Theme.Sheet,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 20,
+            Height = 22,
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 0, 0, 6)
         };
+        h.Paint += (_, e) => e.Graphics.DrawLine(Theme.PenRule, 0, h.Height - 1, h.Width, h.Height - 1);
         t.Controls.Add(h);
         t.SetColumnSpan(h, 2);
     }
@@ -1383,6 +1394,13 @@ public sealed class MainForm : Form
     private string? SlotFor(int index) =>
         _config.JumpHotKeysEnabled && _config.CardHotKey.IsEnabled && index < 9 ? (index + 1).ToString() : null;
 
+    private string? CardHotKeyBadgeFor(int index)
+    {
+        if (SlotFor(index) is not string slot) return null;
+        string mods = _config.CardHotKey.FormatModifiers().Replace(" + ", "+");
+        return string.IsNullOrEmpty(mods) ? slot : $"{mods}+{slot}";
+    }
+
     private void RenderCards()
     {
         _cardsPanel.SuspendLayout();
@@ -1393,14 +1411,15 @@ public sealed class MainForm : Form
         for (int i = 0; i < _config.Cards.Count; i++)
         {
             var card = _config.Cards[i];
+            var badge = CardHotKeyBadgeFor(i);
             if (existingById.Remove(card.Id, out var cc))
             {
                 cc.BindCard(card);
-                cc.SlotText = SlotFor(i);
+                cc.SlotText = badge;
             }
             else
             {
-                cc = CreateCardControl(card, SlotFor(i));
+                cc = CreateCardControl(card, badge);
                 _cardsPanel.Controls.Add(cc);
             }
 
@@ -1489,7 +1508,7 @@ public sealed class MainForm : Form
     {
         float k = _cardsPanel.DeviceDpi / 96f;
         int width = Math.Max((int)Math.Round(220 * k), _cardsPanel.ClientSize.Width - _cardsPanel.Padding.Horizontal);
-        int marginBottom = (int)Math.Round(10 * k);
+        int marginBottom = (int)Math.Round(8 * k);
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
         {
             cc.Scale = k;
@@ -1502,12 +1521,15 @@ public sealed class MainForm : Form
     {
         int i = 0;
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
-            cc.SlotText = SlotFor(i++);
+            cc.SlotText = CardHotKeyBadgeFor(i++);
+        ResizeCards();
     }
 
     private void RefreshCardStates()
     {
         var snap = _snap;
+        bool heightChanged = false;
+        float k = _cardsPanel.DeviceDpi / 96f;
         foreach (var cc in _cardsPanel.Controls.OfType<CardControl>())
         {
             var c = cc.Card;
@@ -1516,7 +1538,9 @@ public sealed class MainForm : Form
             cc.OutMissing = snap != null && c.OutputId.HasValue && !snap.OutputIds.Contains(c.OutputId.Value);
             cc.CommMissing = snap != null && c.CommOutputId.HasValue && !snap.OutputIds.Contains(c.CommOutputId.Value);
             cc.InMissing = snap != null && c.InputId.HasValue && !snap.InputIds.Contains(c.InputId.Value);
+            if (cc.Height != cc.PreferredHeight(k)) heightChanged = true;
         }
+        if (heightChanged) ResizeCards();
     }
 
     private void UpdateNow()
@@ -1931,12 +1955,25 @@ public sealed class MainForm : Form
         else if (relinked)
             RefreshCardStates();
 
+        string? summary = FormatCardOsdSummary(card, _snap);
         if (result.Problem != null)
-            ShowFeedback("CARD PARTLY ACTIVE", $"{card.Name}: {result.Problem}", Theme.Warning, playSwitchChime: false);
+            ShowFeedback("CARD PARTLY ACTIVE", card.Name, Theme.Vermilion, playSwitchChime: false, summary: result.Problem, isWarning: true);
         else
-            ShowFeedback(categoryOverride ?? "CARD ACTIVE", card.Name, Theme.Accent, playSwitchChime: true);
+            ShowFeedback(categoryOverride ?? "CARD ACTIVE", card.Name, Theme.Vermilion, playSwitchChime: true, summary: summary);
 
         AppLog.Info($"Activated card '{card.Name}' ({categoryOverride ?? "manual"}).");
+    }
+
+    private static string? FormatCardOsdSummary(AudioCard card, AudioSnapshot? snap)
+    {
+        var parts = new List<string>(2);
+        string? outName = card.OutputId.HasValue ? card.OutputName : snap?.OutName;
+        string? inName = card.InputId.HasValue ? card.InputName : snap?.InName;
+        string? shortOut = ProfileLogic.ExtractShortDeviceName(outName);
+        string? shortIn = ProfileLogic.ExtractShortDeviceName(inName);
+        if (!string.IsNullOrEmpty(shortOut)) parts.Add($"OUT {shortOut}");
+        if (!string.IsNullOrEmpty(shortIn)) parts.Add($"IN {shortIn}");
+        return parts.Count > 0 ? string.Join("  ·  ", parts) : null;
     }
 
     private Task JumpToCardAsync(int slot) =>
@@ -2200,10 +2237,10 @@ public sealed class MainForm : Form
                 _titleBar.Invalidate();
                 if (_voiceStatusLbl != null)
                 {
-                    _voiceStatusLbl.Text = $"Status: {statusText}";
+                    _voiceStatusLbl.Text = $"STATUS: {statusText.ToUpperInvariant()}";
                     _voiceStatusLbl.ForeColor = listening
-                        ? Theme.Success
-                        : (_config.VoiceControlEnabled ? Theme.Warning : Theme.TextMuted);
+                        ? Theme.FountainGreen
+                        : (_config.VoiceControlEnabled ? Theme.Vermilion : Theme.Graphite);
                 }
                 if (_config.VoiceControlEnabled && !listening && statusText.StartsWith("Voice unavailable", StringComparison.Ordinal))
                 {
@@ -2263,10 +2300,18 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ShowFeedback(string category, string title, Color accent, bool playSwitchChime)
+    private void ShowFeedback(
+        string category,
+        string title,
+        Color accent,
+        bool playSwitchChime,
+        string? summary = null,
+        bool isWarning = false)
     {
-        SetStatus($"{category}: {title}", accent == Theme.Warning || accent == Theme.Danger);
-        _osd.ShowMessage(category, title, accent);
+        bool warn = isWarning || category.Contains("FAILED", StringComparison.OrdinalIgnoreCase) ||
+                    category.Contains("UNAVAILABLE", StringComparison.OrdinalIgnoreCase);
+        SetStatus($"{category}: {title}", warn);
+        _osd.ShowMessage(category, title, accent, summary);
         if (playSwitchChime && _config.ChimeEnabled)
         {
             ChimePlayer.Play(ChimeCue.Switch, waitForDeviceRouting: true);
@@ -2494,8 +2539,8 @@ public sealed class MainForm : Form
     {
         var root = new ToolStripMenuItem(label);
         root.DropDown.Renderer = new DarkMenuRenderer();
-        root.DropDown.BackColor = Theme.BgCard;
-        root.DropDown.ForeColor = Theme.TextPrimary;
+        root.DropDown.BackColor = Theme.Paper;
+        root.DropDown.ForeColor = Theme.Ink;
         root.DropDown.Font = Theme.Body;
 
         var names = isOutput ? _snap?.OutputNames : _snap?.InputNames;
