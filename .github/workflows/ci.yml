@@ -47,6 +47,14 @@ jobs:
           dotnet publish AudioProfileSwitcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o publish-standalone
           mv publish-standalone/AudioProfileSwitcher.exe publish/AudioProfileSwitcher-standalone.exe
 
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd publish
+          sha256sum AudioProfileSwitcher.exe AudioProfileSwitcher-standalone.exe | sed 's/ \*/  /' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Upload EXE Artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -54,6 +62,7 @@ jobs:
           path: |
             publish/AudioProfileSwitcher.exe
             publish/AudioProfileSwitcher-standalone.exe
+            publish/SHA256SUMS.txt
 
   attach-release:
     needs: build-and-test
@@ -69,7 +78,7 @@ jobs:
           name: AudioProfileSwitcher-win-x64
           path: publish
 
-      - name: Attach EXEs to GitHub Release
+      - name: Attach EXEs and checksums to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
@@ -85,7 +94,7 @@ jobs:
             exit 1
           fi
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" publish/AudioProfileSwitcher.exe publish/AudioProfileSwitcher-standalone.exe -R "$REPO" --clobber
+            gh release upload "$TAG" publish/AudioProfileSwitcher.exe publish/AudioProfileSwitcher-standalone.exe publish/SHA256SUMS.txt -R "$REPO" --clobber
           else
-            gh release create "$TAG" publish/AudioProfileSwitcher.exe publish/AudioProfileSwitcher-standalone.exe -R "$REPO" --title "AudioProfileSwitcher $TAG" --notes "Release $TAG"
+            gh release create "$TAG" publish/AudioProfileSwitcher.exe publish/AudioProfileSwitcher-standalone.exe publish/SHA256SUMS.txt -R "$REPO" --title "AudioProfileSwitcher $TAG" --notes "Release $TAG"
           fi

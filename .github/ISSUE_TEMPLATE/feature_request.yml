@@ -1,0 +1,25 @@
+name: Feature Request
+description: Suggest a new capability, workflow tweak, or UI improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Tell us about your setup or daily workflow friction.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed feature or behavior
+      description: Describe how you'd like it to work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context (optional)
+      description: Screenshots, device types, or similar tools for reference.
