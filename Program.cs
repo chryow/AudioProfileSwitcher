@@ -80,6 +80,7 @@ static class Program
         { IsBackground = true };
         listener.Start();
 
+        Application.ApplicationExit += (_, _) => Theme.DisposeResources();
         Application.Run(form);
         AppLog.Info("AudioProfileSwitcher exited cleanly.");
     }
@@ -109,31 +110,32 @@ internal static class Native
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    /// <summary>Dark caption bar for standard dialogs (Windows 10 20H1+ / 11).</summary>
-    public static void DarkTitleBar(IntPtr hwnd)
+    private static int ToColorRef(Color color) => color.R | (color.G << 8) | (color.B << 16);
+
+    /// <summary>Light Editorial E-Ink title bar caption, text, and ink border (Windows 11; safe no-op on Windows 10).</summary>
+    public static void EditorialDialogChrome(IntPtr hwnd)
     {
-        int on = 1;
-        try { DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)); } catch { }
+        int darkOff = 0;
+        try { DwmSetWindowAttribute(hwnd, 20, ref darkOff, sizeof(int)); } catch { }
+        int capColor = ToColorRef(Theme.Paper);
+        try { DwmSetWindowAttribute(hwnd, 35, ref capColor, sizeof(int)); } catch { }
+        int textColor = ToColorRef(Theme.Ink);
+        try { DwmSetWindowAttribute(hwnd, 36, ref textColor, sizeof(int)); } catch { }
+        SetBorderColor(hwnd, Theme.StrongBorder);
+        CrispCorners(hwnd);
     }
 
-    /// <summary>Rounded window corners on Windows 11 (ignored elsewhere).</summary>
-    public static void RoundCorners(IntPtr hwnd)
+    /// <summary>Crisp square corners on Windows 11 so 1px solid ink outer borders remain razor-sharp.</summary>
+    public static void CrispCorners(IntPtr hwnd)
     {
-        int round = 2; // DWMWCP_ROUND
-        try { DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); } catch { }
-    }
-
-    /// <summary>Subtle small-radius rounded corners on Windows 11 for floating pills.</summary>
-    public static void RoundCornersSmall(IntPtr hwnd)
-    {
-        int round = 3; // DWMWCP_ROUNDSMALL
-        try { DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); } catch { }
+        int square = 1; // DWMWCP_DONOTROUND
+        try { DwmSetWindowAttribute(hwnd, 33, ref square, sizeof(int)); } catch { }
     }
 
     /// <summary>Tints the native Windows 11 DWM border (ignored on Windows 10).</summary>
     public static void SetBorderColor(IntPtr hwnd, Color color)
     {
-        int colorRef = color.R | (color.G << 8) | (color.B << 16);
+        int colorRef = ToColorRef(color);
         try { DwmSetWindowAttribute(hwnd, 34, ref colorRef, sizeof(int)); } catch { }
     }
 

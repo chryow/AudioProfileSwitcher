@@ -1,74 +1,168 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 
 namespace AudioProfileSwitcher;
 
+/// <summary>
+/// Centralized Editorial E-Ink color tokens, Windows system fonts, and cached GDI+ pens/brushes
+/// (printed ledger / Japanese stationery / tactile e-reader aesthetic).
+/// </summary>
 internal static class Theme
 {
-    // Deep obsidian-slate surfaces with clear visual elevation hierarchy
-    public static readonly Color BgMain = Color.FromArgb(13, 15, 20);
-    public static readonly Color BgSurface = Color.FromArgb(19, 22, 30);
-    public static readonly Color BgCard = Color.FromArgb(24, 28, 38);
-    public static readonly Color BgCardTop = Color.FromArgb(29, 34, 46);
-    public static readonly Color BgCardHover = Color.FromArgb(33, 39, 53);
-    public static readonly Color BgElevated = Color.FromArgb(36, 42, 58);
-    public static readonly Color BgBorder = Color.FromArgb(44, 51, 68);
-    public static readonly Color BgBorderStrong = Color.FromArgb(62, 72, 96);
-    public static readonly Color Sheen = Color.FromArgb(24, 255, 255, 255);
+    // ---- Core Editorial E-Ink Palette -------------------------------------------------------
+    public static readonly Color Paper = Color.FromArgb(247, 245, 240);          // #F7F5F0 Unbleached Paper
+    public static readonly Color Sheet = Color.FromArgb(255, 255, 255);          // #FFFFFF Crisp Sheet
+    public static readonly Color PressedPaper = Color.FromArgb(239, 236, 228);   // #EFECE4 Hover / Pressed Paper
+    public static readonly Color Ink = Color.FromArgb(26, 26, 24);               // #1A1A18 Rich Ink
+    public static readonly Color InkHover = Color.FromArgb(46, 46, 42);          // Subtle pressed/hover Rich Ink
+    public static readonly Color Graphite = Color.FromArgb(107, 105, 99);        // #6B6963 Muted Text / Sublabels
+    public static readonly Color Rule = Color.FromArgb(216, 212, 202);           // #D8D4CA Hairline Borders & Dividers
+    public static readonly Color StrongBorder = Color.FromArgb(26, 26, 24);      // #1A1A18 Strong / Active Border
+    public static readonly Color Vermilion = Color.FromArgb(200, 62, 43);        // #C83E2B Stamp Vermilion
+    public static readonly Color VermilionHover = Color.FromArgb(176, 52, 35);   // Pressed / Hover Vermilion
+    public static readonly Color FountainGreen = Color.FromArgb(35, 78, 61);     // #234E3D Fountain Pen Green
 
-    // Indigo -> Violet modern accent gradient + semantic colors
-    public static readonly Color Accent = Color.FromArgb(99, 102, 241);
-    public static readonly Color AccentEnd = Color.FromArgb(139, 92, 246);
-    public static readonly Color AccentHoverStart = Color.FromArgb(115, 118, 250);
-    public static readonly Color AccentHoverEnd = Color.FromArgb(155, 110, 252);
-    public static readonly Color AccentSoft = Color.FromArgb(34, 99, 102, 241);
-    public static readonly Color AccentGlow = Color.FromArgb(72, 129, 140, 248);
+    // ---- Semantic Aliases -------------------------------------------------------------------
+    public static Color BgMain => Paper;
+    public static Color BgSurface => Sheet;
+    public static Color BgCard => Sheet;
+    public static Color BgCardHover => PressedPaper;
+    public static Color BgElevated => PressedPaper;
+    public static Color BgBorder => Rule;
+    public static Color BgBorderStrong => StrongBorder;
 
-    public static readonly Color Danger = Color.FromArgb(244, 63, 94);
-    public static readonly Color DangerSoft = Color.FromArgb(38, 244, 63, 94);
-    public static readonly Color Success = Color.FromArgb(34, 197, 94);
-    public static readonly Color SuccessSoft = Color.FromArgb(34, 34, 197, 94);
-    public static readonly Color Warning = Color.FromArgb(245, 158, 11);
-    public static readonly Color WarningSoft = Color.FromArgb(36, 245, 158, 11);
+    public static Color TextPrimary => Ink;
+    public static Color TextSoft => Graphite;
+    public static Color TextMuted => Graphite;
 
-    public static readonly Color TextPrimary = Color.FromArgb(244, 246, 251);
-    public static readonly Color TextSoft = Color.FromArgb(194, 202, 218);
-    public static readonly Color TextMuted = Color.FromArgb(134, 145, 166);
+    public static Color Accent => Vermilion;
+    public static Color AccentEnd => Vermilion;
+    public static Color Danger => Vermilion;
+    public static Color Warning => Vermilion;
+    public static Color Success => FountainGreen;
 
-    // Cached fonts (Prefer Segoe UI Variable on Windows 11, fallback to Segoe UI)
-    private static readonly string UiFamily = ResolveUiFontFamily();
+    // ---- Typography (Built-in Windows System Fonts) -----------------------------------------
+    private static readonly string MonoFamily = ResolveMonoFontFamily();
+    public static readonly bool HasMdl2 = HasFontFamily("Segoe MDL2 Assets");
 
-    private static string ResolveUiFontFamily()
+    private static string ResolveMonoFontFamily()
+    {
+        if (HasFontFamily("Cascadia Mono")) return "Cascadia Mono";
+        return "Consolas";
+    }
+
+    private static bool HasFontFamily(string name)
     {
         try
         {
-            if (FontFamily.Families.Any(f => f.Name.Equals("Segoe UI Variable Text", StringComparison.OrdinalIgnoreCase)))
-                return "Segoe UI Variable Text";
+            return FontFamily.Families.Any(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         }
-        catch { }
-        return "Segoe UI";
+        catch
+        {
+            return false;
+        }
     }
 
-    public static readonly Font Body = new(UiFamily, 8.75f);
-    public static readonly Font BodyBold = new(UiFamily, 8.75f, FontStyle.Bold);
-    public static readonly Font Title = new(UiFamily, 10f, FontStyle.Bold);
-    public static readonly Font Header = new(UiFamily, 9.5f, FontStyle.Bold);
-    public static readonly Font Small = new(UiFamily, 8f);
-    public static readonly Font SmallBold = new(UiFamily, 7.5f, FontStyle.Bold);
-    public static readonly Font MicroBold = new(UiFamily, 6.75f, FontStyle.Bold);
+    // Editorial Serif (Window Title & Profile Headings)
+    public static readonly Font Title = new("Georgia", 11f, FontStyle.Bold);
+    public static readonly Font CardTitle = new("Georgia", 10f, FontStyle.Bold);
+    public static readonly Font Header = new("Georgia", 10.5f, FontStyle.Bold);
 
-    public static readonly bool HasMdl2 = FontFamily.Families.Any(f => f.Name == "Segoe MDL2 Assets");
-    public static readonly Font IconFont = HasMdl2 ? new Font("Segoe MDL2 Assets", 9.5f) : new Font(UiFamily, 10f);
+    // Clean UI Sans (Labels, Device Names, Dialog Controls)
+    public static readonly Font Body = new("Segoe UI", 9f, FontStyle.Regular);
+    public static readonly Font BodyBold = new("Segoe UI", 9f, FontStyle.Bold);
+    public static readonly Font Small = new("Segoe UI", 8.5f, FontStyle.Regular);
+
+    // Monospace (Hotkeys, Status Tags, Badges, Colophon)
+    public static readonly Font Mono = new(MonoFamily, 8f, FontStyle.Regular);
+    public static readonly Font MonoBold = new(MonoFamily, 8f, FontStyle.Bold);
+    public static readonly Font MonoSmall = new(MonoFamily, 7.5f, FontStyle.Regular);
+    public static readonly Font MonoSmallBold = new(MonoFamily, 7.5f, FontStyle.Bold);
+
+    public static Font SmallBold => MonoBold;
+    public static Font MicroBold => MonoSmallBold;
+    public static readonly Font IconFont = HasMdl2 ? new Font("Segoe MDL2 Assets", 9.5f) : new Font("Segoe UI", 9.5f);
 
     public static string Glyph(string mdl2, string fallback) => HasMdl2 ? mdl2 : fallback;
+    public static string MonospaceFontName => MonoFamily;
+
+    // ---- Cached GDI+ Brushes & Pens (disposed via DisposeResources on app exit) -------------
+    public static readonly SolidBrush BrushPaper = new(Paper);
+    public static readonly SolidBrush BrushSheet = new(Sheet);
+    public static readonly SolidBrush BrushPressedPaper = new(PressedPaper);
+    public static readonly SolidBrush BrushInk = new(Ink);
+    public static readonly SolidBrush BrushInkHover = new(InkHover);
+    public static readonly SolidBrush BrushGraphite = new(Graphite);
+    public static readonly SolidBrush BrushRule = new(Rule);
+    public static readonly SolidBrush BrushVermilion = new(Vermilion);
+    public static readonly SolidBrush BrushVermilionHover = new(VermilionHover);
+    public static readonly SolidBrush BrushFountainGreen = new(FountainGreen);
+
+    public static readonly Pen PenRule = new(Rule, 1f);
+    public static readonly Pen PenInk = new(Ink, 1f);
+    public static readonly Pen PenInkFocus = new(Ink, 1.5f);
+    public static readonly Pen PenVermilion = new(Vermilion, 1f);
+    public static readonly Pen PenFountainGreen = new(FountainGreen, 1f);
+    public static readonly Pen PenGraphite = new(Graphite, 1f);
+
+    private static int _disposed;
+
+    public static void ConfigureGraphics(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+    }
+
+    public static void DisposeResources()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        Title.Dispose();
+        CardTitle.Dispose();
+        Header.Dispose();
+        Body.Dispose();
+        BodyBold.Dispose();
+        Small.Dispose();
+        Mono.Dispose();
+        MonoBold.Dispose();
+        MonoSmall.Dispose();
+        MonoSmallBold.Dispose();
+        IconFont.Dispose();
+
+        BrushPaper.Dispose();
+        BrushSheet.Dispose();
+        BrushPressedPaper.Dispose();
+        BrushInk.Dispose();
+        BrushInkHover.Dispose();
+        BrushGraphite.Dispose();
+        BrushRule.Dispose();
+        BrushVermilion.Dispose();
+        BrushVermilionHover.Dispose();
+        BrushFountainGreen.Dispose();
+
+        PenRule.Dispose();
+        PenInk.Dispose();
+        PenInkFocus.Dispose();
+        PenVermilion.Dispose();
+        PenFountainGreen.Dispose();
+        PenGraphite.Dispose();
+    }
 }
 
+/// <summary>Crisp Editorial E-Ink vector primitives (zero gradients, zero glow, tight 0–4px corners).</summary>
 internal static class Gfx
 {
     public static GraphicsPath RoundRect(Rectangle r, int radius)
     {
-        int rad = Math.Max(1, Math.Min(radius, Math.Min(r.Width, r.Height) / 2));
-        int d = rad * 2;
         var path = new GraphicsPath();
+        int clamped = Math.Clamp(radius, 0, Math.Min(4, Math.Min(r.Width, r.Height) / 2));
+        if (clamped <= 0)
+        {
+            path.AddRectangle(r);
+            return path;
+        }
+
+        int d = clamped * 2;
         path.AddArc(r.X, r.Y, d, d, 180, 90);
         path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
         path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
@@ -77,51 +171,76 @@ internal static class Gfx
         return path;
     }
 
-    public static void FillGradientRoundRect(
-        Graphics g,
-        Rectangle r,
-        int radius,
-        Color start,
-        Color end,
-        float angle = 0f)
+    public static void FillRect(Graphics g, Rectangle r, int radius, Brush brush)
     {
         if (r.Width <= 0 || r.Height <= 0) return;
+        if (radius <= 0)
+        {
+            g.FillRectangle(brush, r);
+            return;
+        }
         using var path = RoundRect(r, radius);
-        using var brush = new LinearGradientBrush(r, start, end, angle);
         g.FillPath(brush, path);
     }
 
-    public static void DrawTopSheen(Graphics g, Rectangle r, int radius)
+    public static void StrokeRect(Graphics g, Rectangle r, int radius, Pen pen)
     {
-        if (r.Width <= radius * 2 + 2) return;
-        using var pen = new Pen(Theme.Sheen, 1f);
-        g.DrawLine(pen, r.X + radius, r.Y + 1, r.Right - radius, r.Y + 1);
+        if (r.Width <= 0 || r.Height <= 0) return;
+        if (radius <= 0)
+        {
+            g.DrawRectangle(pen, r);
+            return;
+        }
+        using var path = RoundRect(r, radius);
+        g.DrawPath(pen, path);
     }
 
-    /// <summary>Draws the miniature indigo-violet gradient speaker emblem.</summary>
+    public static void FillAndStrokeRect(Graphics g, Rectangle r, int radius, Brush fill, Pen border)
+    {
+        if (r.Width <= 0 || r.Height <= 0) return;
+        if (radius <= 0)
+        {
+            g.FillRectangle(fill, r);
+            g.DrawRectangle(border, r);
+            return;
+        }
+        using var path = RoundRect(r, radius);
+        g.FillPath(fill, path);
+        g.DrawPath(border, path);
+    }
+
+    /// <summary>Draws a crisp Editorial E-Ink stamp emblem (ink square, paper speaker glyph, vermilion seal dot).</summary>
     public static void DrawAppEmblem(Graphics g, RectangleF r)
     {
-        using var grad = new LinearGradientBrush(r, Theme.Accent, Theme.AccentEnd, 135f);
-        g.FillEllipse(grad, r);
+        var ri = Rectangle.Round(r);
+        using (var path = RoundRect(ri, 2))
+            g.FillPath(Theme.BrushInk, path);
 
         float x = r.X;
         float y = r.Y;
         float w = r.Width;
         float h = r.Height;
 
-        using var white = new SolidBrush(Color.White);
-        g.FillPolygon(white, new[]
+        g.FillPolygon(Theme.BrushPaper, new[]
         {
-            new PointF(x + w * 0.24f, y + h * 0.40f),
-            new PointF(x + w * 0.40f, y + h * 0.40f),
-            new PointF(x + w * 0.58f, y + h * 0.25f),
-            new PointF(x + w * 0.58f, y + h * 0.75f),
-            new PointF(x + w * 0.40f, y + h * 0.60f),
-            new PointF(x + w * 0.24f, y + h * 0.60f)
+            new PointF(x + w * 0.20f, y + h * 0.40f),
+            new PointF(x + w * 0.36f, y + h * 0.40f),
+            new PointF(x + w * 0.54f, y + h * 0.25f),
+            new PointF(x + w * 0.54f, y + h * 0.75f),
+            new PointF(x + w * 0.36f, y + h * 0.60f),
+            new PointF(x + w * 0.20f, y + h * 0.60f)
         });
 
-        using var pen = new Pen(Color.White, Math.Max(1.3f, w * 0.075f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-        g.DrawArc(pen, x + w * 0.48f, y + h * 0.34f, w * 0.26f, h * 0.32f, -48, 96);
+        using var wavePen = new Pen(Theme.Paper, Math.Max(1.25f, w * 0.075f))
+        {
+            StartCap = LineCap.Square,
+            EndCap = LineCap.Square
+        };
+        g.DrawArc(wavePen, x + w * 0.46f, y + h * 0.34f, w * 0.26f, h * 0.32f, -45, 90);
+
+        // Stamp Vermilion editorial square seal in the top-right corner
+        float dot = Math.Max(3f, w * 0.20f);
+        g.FillRectangle(Theme.BrushVermilion, x + w - dot - Math.Max(2f, w * 0.10f), y + Math.Max(2f, h * 0.10f), dot, dot);
     }
 
     public static void DrawSpeakerIcon(Graphics g, RectangleF r, Color color)
@@ -130,60 +249,46 @@ internal static class Gfx
         using var b = new SolidBrush(color);
         g.FillPolygon(b, new[]
         {
-            new PointF(x + w * 0.12f, y + h * 0.36f),
+            new PointF(x + w * 0.10f, y + h * 0.36f),
             new PointF(x + w * 0.34f, y + h * 0.36f),
             new PointF(x + w * 0.56f, y + h * 0.18f),
             new PointF(x + w * 0.56f, y + h * 0.82f),
             new PointF(x + w * 0.34f, y + h * 0.64f),
-            new PointF(x + w * 0.12f, y + h * 0.64f)
+            new PointF(x + w * 0.10f, y + h * 0.64f)
         });
-        using var p = new Pen(color, Math.Max(1.2f, w * 0.1f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-        g.DrawArc(p, x + w * 0.48f, y + h * 0.28f, w * 0.34f, h * 0.44f, -46, 92);
+        using var p = new Pen(color, Math.Max(1.2f, w * 0.10f)) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
+        g.DrawArc(p, x + w * 0.48f, y + h * 0.28f, w * 0.34f, h * 0.44f, -45, 90);
     }
 
     public static void DrawMicIcon(Graphics g, RectangleF r, Color color, bool muted = false)
     {
         float x = r.X, y = r.Y, w = r.Width, h = r.Height;
-        float capW = w * 0.34f;
-        float capH = h * 0.48f;
+        float capW = w * 0.32f;
+        float capH = h * 0.46f;
         float capX = x + (w - capW) * 0.5f;
         float capY = y + h * 0.12f;
 
         using var b = new SolidBrush(color);
-        using (var capPath = RoundRect(Rectangle.Round(new RectangleF(capX, capY, capW, capH)), Math.Max(2, (int)(capW / 2))))
+        using (var capPath = RoundRect(Rectangle.Round(new RectangleF(capX, capY, capW, capH)), 2))
             g.FillPath(b, capPath);
 
-        using var p = new Pen(color, Math.Max(1.25f, w * 0.1f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        using var p = new Pen(color, Math.Max(1.2f, w * 0.10f)) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
         g.DrawArc(p, x + w * 0.20f, y + h * 0.28f, w * 0.60f, h * 0.44f, 0, 180);
         g.DrawLine(p, x + w * 0.50f, y + h * 0.72f, x + w * 0.50f, y + h * 0.88f);
         g.DrawLine(p, x + w * 0.32f, y + h * 0.88f, x + w * 0.68f, y + h * 0.88f);
 
         if (muted)
         {
-            using var slash = new Pen(Theme.Danger, Math.Max(1.6f, w * 0.12f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            g.DrawLine(slash, x + w * 0.16f, y + h * 0.84f, x + w * 0.84f, y + h * 0.16f);
+            using var slash = new Pen(Theme.Vermilion, Math.Max(1.5f, w * 0.12f)) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
+            g.DrawLine(slash, x + w * 0.14f, y + h * 0.84f, x + w * 0.86f, y + h * 0.16f);
         }
-    }
-
-    public static void DrawBoltIcon(Graphics g, RectangleF r, Color color)
-    {
-        float x = r.X, y = r.Y, w = r.Width, h = r.Height;
-        using var b = new SolidBrush(color);
-        g.FillPolygon(b, new[]
-        {
-            new PointF(x + w * 0.56f, y + h * 0.08f),
-            new PointF(x + w * 0.20f, y + h * 0.54f),
-            new PointF(x + w * 0.48f, y + h * 0.54f),
-            new PointF(x + w * 0.42f, y + h * 0.92f),
-            new PointF(x + w * 0.80f, y + h * 0.44f),
-            new PointF(x + w * 0.52f, y + h * 0.44f)
-        });
     }
 }
 
 internal enum ModernButtonKind
 {
     Primary,
+    AccentPrimary,
     Secondary,
     Ghost,
     DangerGhost,
@@ -191,7 +296,7 @@ internal enum ModernButtonKind
     Chip
 }
 
-/// <summary>Custom-painted modern rounded button with gradient primary style, hover elevation, and focus rings.</summary>
+/// <summary>Crisp Editorial E-Ink flat button with sharp 2px geometry and ink hairline borders.</summary>
 internal sealed class ModernButton : Control
 {
     private ModernButtonKind _kind;
@@ -209,14 +314,14 @@ internal sealed class ModernButton : Control
         Cursor = Cursors.Hand;
         Font = kind switch
         {
-            ModernButtonKind.Primary => Theme.BodyBold,
-            ModernButtonKind.Keycap => Theme.SmallBold,
-            ModernButtonKind.Chip => Theme.Small,
+            ModernButtonKind.Primary or ModernButtonKind.AccentPrimary => Theme.BodyBold,
+            ModernButtonKind.Keycap => Theme.MonoBold,
+            ModernButtonKind.Chip => Theme.MonoSmall,
             ModernButtonKind.Ghost or ModernButtonKind.DangerGhost => Theme.IconFont,
             _ => Theme.Body
         };
-        ForeColor = Theme.TextPrimary;
-        BackColor = Theme.BgMain;
+        ForeColor = Theme.Ink;
+        BackColor = Theme.Paper;
         Size = new Size(100, 32);
         TabStop = kind is not (ModernButtonKind.Ghost or ModernButtonKind.DangerGhost or ModernButtonKind.Chip);
     }
@@ -224,7 +329,19 @@ internal sealed class ModernButton : Control
     public ModernButtonKind Kind
     {
         get => _kind;
-        set { _kind = value; Invalidate(); }
+        set
+        {
+            _kind = value;
+            Font = value switch
+            {
+                ModernButtonKind.Primary or ModernButtonKind.AccentPrimary => Theme.BodyBold,
+                ModernButtonKind.Keycap => Theme.MonoBold,
+                ModernButtonKind.Chip => Theme.MonoSmall,
+                ModernButtonKind.Ghost or ModernButtonKind.DangerGhost => Theme.IconFont,
+                _ => Theme.Body
+            };
+            Invalidate();
+        }
     }
 
     public bool Active
@@ -239,7 +356,7 @@ internal sealed class ModernButton : Control
         set => _dialogResult = value;
     }
 
-    public int CornerRadius { get; set; } = 8;
+    public int CornerRadius { get; set; } = 2;
 
     protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
@@ -287,113 +404,124 @@ internal sealed class ModernButton : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
-        float k = Math.Max(1f, DeviceDpi / 96f);
         int inset = _pressed ? 1 : 0;
         var rect = new Rectangle(inset, inset, Math.Max(4, Width - 1 - inset * 2), Math.Max(4, Height - 1 - inset * 2));
-        int rad = _kind == ModernButtonKind.Chip
-            ? Math.Max(4, rect.Height / 2)
-            : (int)Math.Round(CornerRadius * k);
-
-        Color textColor = Enabled ? ForeColor : Theme.TextMuted;
+        int rad = Math.Clamp(CornerRadius, 0, 3);
+        Color textColor = Enabled ? ForeColor : Theme.Graphite;
+        string displayText = Text;
 
         switch (_kind)
         {
             case ModernButtonKind.Primary:
                 if (Enabled)
                 {
-                    var c1 = _hover ? Theme.AccentHoverStart : Theme.Accent;
-                    var c2 = _hover ? Theme.AccentHoverEnd : Theme.AccentEnd;
-                    Gfx.FillGradientRoundRect(g, rect, rad, c1, c2, 12f);
-                    Gfx.DrawTopSheen(g, rect, rad);
+                    Gfx.FillAndStrokeRect(g, rect, rad, _hover ? Theme.BrushInkHover : Theme.BrushInk, Theme.PenInk);
+                    textColor = Theme.Paper;
                 }
                 else
                 {
-                    using var p = Gfx.RoundRect(rect, rad);
-                    using var b = new SolidBrush(Theme.BgElevated);
-                    g.FillPath(b, p);
+                    Gfx.FillAndStrokeRect(g, rect, rad, Theme.BrushPressedPaper, Theme.PenRule);
+                    textColor = Theme.Graphite;
                 }
-                textColor = Enabled ? Color.White : Theme.TextMuted;
+                break;
+
+            case ModernButtonKind.AccentPrimary:
+                if (Enabled)
+                {
+                    var fill = _hover ? Theme.BrushVermilionHover : Theme.BrushVermilion;
+                    Gfx.FillAndStrokeRect(g, rect, rad, fill, Theme.PenVermilion);
+                    textColor = Theme.Paper;
+                }
+                else
+                {
+                    Gfx.FillAndStrokeRect(g, rect, rad, Theme.BrushPressedPaper, Theme.PenRule);
+                    textColor = Theme.Graphite;
+                }
                 break;
 
             case ModernButtonKind.Secondary:
-                using (var p = Gfx.RoundRect(rect, rad))
-                {
-                    using var bg = new SolidBrush(_hover ? Theme.BgElevated : Theme.BgCard);
-                    g.FillPath(bg, p);
-                    using var pen = new Pen(_hover ? Theme.BgBorderStrong : Theme.BgBorder, 1f);
-                    g.DrawPath(pen, p);
-                }
-                if (_hover) Gfx.DrawTopSheen(g, rect, rad);
+                Gfx.FillAndStrokeRect(
+                    g,
+                    rect,
+                    rad,
+                    _hover && Enabled ? Theme.BrushPressedPaper : Theme.BrushSheet,
+                    Enabled ? Theme.PenInk : Theme.PenRule);
+                textColor = Enabled ? Theme.Ink : Theme.Graphite;
                 break;
 
             case ModernButtonKind.Keycap:
-                using (var p = Gfx.RoundRect(rect, (int)Math.Round(6 * k)))
-                {
-                    var fill = _active ? Theme.AccentSoft : (_hover ? Theme.BgElevated : Theme.BgSurface);
-                    using var bg = new SolidBrush(fill);
-                    g.FillPath(bg, p);
-                    var border = _active ? Theme.Accent : (_hover ? Theme.BgBorderStrong : Theme.BgBorder);
-                    using var pen = new Pen(border, 1f);
-                    g.DrawPath(pen, p);
-                }
-                Gfx.DrawTopSheen(g, rect, (int)Math.Round(6 * k));
+                displayText = Text.ToUpperInvariant();
+                var kcFill = _active || _hover ? Theme.BrushPressedPaper : Theme.BrushSheet;
+                var kcBorder = _active ? Theme.PenVermilion : (_hover ? Theme.PenInk : Theme.PenRule);
+                Gfx.FillAndStrokeRect(g, rect, 2, kcFill, kcBorder);
+                textColor = _active ? Theme.Vermilion : (Enabled ? ForeColor : Theme.Graphite);
                 break;
 
             case ModernButtonKind.Chip:
-                using (var p = Gfx.RoundRect(rect, rad))
-                {
-                    using var bg = new SolidBrush(_hover ? Theme.AccentSoft : Theme.BgCard);
-                    g.FillPath(bg, p);
-                    using var pen = new Pen(_hover ? Theme.Accent : Theme.BgBorder, 1f);
-                    g.DrawPath(pen, p);
-                }
-                textColor = _hover ? Theme.TextPrimary : Theme.TextSoft;
+                Gfx.FillAndStrokeRect(
+                    g,
+                    rect,
+                    2,
+                    _hover ? Theme.BrushPressedPaper : Theme.BrushSheet,
+                    _hover ? Theme.PenInk : Theme.PenRule);
+                textColor = _hover ? Theme.Ink : Theme.Graphite;
                 break;
 
             case ModernButtonKind.Ghost:
-                if (_hover || _active)
+                var gRect = Rectangle.Inflate(rect, -4, -6);
+                if (_active)
                 {
-                    var pill = Rectangle.Inflate(rect, -3, -5);
-                    using var p = Gfx.RoundRect(pill, (int)Math.Round(7 * k));
-                    using var bg = new SolidBrush(_active ? Theme.AccentSoft : Theme.BgCardHover);
-                    g.FillPath(bg, p);
-                    if (_active)
-                    {
-                        using var pen = new Pen(Color.FromArgb(90, Theme.Accent), 1f);
-                        g.DrawPath(pen, p);
-                    }
+                    Gfx.FillAndStrokeRect(g, gRect, 2, Theme.BrushInk, Theme.PenInk);
+                    textColor = Theme.Paper;
                 }
-                textColor = _active ? Theme.AccentEnd : (_hover ? Theme.TextPrimary : Theme.TextMuted);
+                else if (_hover)
+                {
+                    Gfx.FillAndStrokeRect(g, gRect, 2, Theme.BrushPressedPaper, Theme.PenInk);
+                    textColor = Theme.Ink;
+                }
+                else
+                {
+                    textColor = Theme.Ink;
+                }
                 break;
 
             case ModernButtonKind.DangerGhost:
+                var dRect = Rectangle.Inflate(rect, -4, -6);
                 if (_hover)
                 {
-                    var pill = Rectangle.Inflate(rect, -3, -5);
-                    using var p = Gfx.RoundRect(pill, (int)Math.Round(7 * k));
-                    using var bg = new SolidBrush(Theme.Danger);
-                    g.FillPath(bg, p);
+                    Gfx.FillAndStrokeRect(g, dRect, 2, Theme.BrushVermilion, Theme.PenVermilion);
+                    textColor = Theme.Paper;
                 }
-                textColor = _hover ? Color.White : Theme.TextMuted;
+                else
+                {
+                    textColor = Theme.Ink;
+                }
                 break;
         }
 
-        if (Focused && ShowFocusCues && _kind is ModernButtonKind.Primary or ModernButtonKind.Secondary or ModernButtonKind.Keycap)
+        if (Focused && ShowFocusCues &&
+            _kind is ModernButtonKind.Primary or ModernButtonKind.AccentPrimary or ModernButtonKind.Secondary or ModernButtonKind.Keycap)
         {
-            using var fp = Gfx.RoundRect(rect, rad);
-            using var fpen = new Pen(Theme.AccentEnd, 1.5f);
-            g.DrawPath(fpen, fp);
+            var focusRect = Rectangle.Inflate(rect, -2, -2);
+            if (focusRect.Width > 2 && focusRect.Height > 2)
+            {
+                using var fpen = new Pen(_kind is ModernButtonKind.Primary or ModernButtonKind.AccentPrimary ? Theme.Paper : Theme.Ink, 1f)
+                {
+                    DashStyle = DashStyle.Dot
+                };
+                Gfx.StrokeRect(g, focusRect, 0, fpen);
+            }
         }
 
-        TextRenderer.DrawText(g, Text, Font, rect, textColor,
+        TextRenderer.DrawText(g, displayText, Font, rect, textColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
     }
 }
 
-/// <summary>Rounded modern dark text box with animated-style focus border.</summary>
+/// <summary>Flat Crisp Sheet text box with 1px Rule border that sharpens to Rich Ink on focus.</summary>
 internal sealed class DarkTextBox : Panel
 {
     private readonly TextBox _inner;
@@ -403,16 +531,16 @@ internal sealed class DarkTextBox : Panel
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.BgCard;
-        Padding = new Padding(10, 6, 10, 6);
+        BackColor = Theme.Sheet;
+        Padding = new Padding(9, 6, 9, 6);
         Size = new Size(320, 32);
 
         _inner = new TextBox
         {
             BorderStyle = BorderStyle.None,
             Dock = DockStyle.Fill,
-            BackColor = Theme.BgCard,
-            ForeColor = Theme.TextPrimary,
+            BackColor = Theme.Sheet,
+            ForeColor = Theme.Ink,
             Font = Theme.Body
         };
         _inner.GotFocus += (_, _) => { _focused = true; Invalidate(); };
@@ -445,49 +573,39 @@ internal sealed class DarkTextBox : Panel
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
-        float k = Math.Max(1f, DeviceDpi / 96f);
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
-        int rad = (int)Math.Round(7 * k);
-        using var path = Gfx.RoundRect(r, rad);
-        using (var bg = new SolidBrush(Theme.BgCard)) g.FillPath(bg, path);
-        using (var pen = new Pen(_focused ? Theme.Accent : Theme.BgBorder, _focused ? 1.4f : 1f))
-            g.DrawPath(pen, path);
+        Gfx.FillAndStrokeRect(g, r, 2, Theme.BrushSheet, _focused ? Theme.PenInk : Theme.PenRule);
     }
 }
 
-/// <summary>Elevated rounded section card used in Settings.</summary>
+/// <summary>Flat Crisp Sheet ledger section container with a 1px solid hairline border.</summary>
 internal sealed class SectionCard : Panel
 {
     public SectionCard()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.BgSurface;
+        BackColor = Theme.Sheet;
         Padding = new Padding(14, 10, 14, 12);
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
-        float k = Math.Max(1f, DeviceDpi / 96f);
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
-        int rad = (int)Math.Round(10 * k);
-        using var path = Gfx.RoundRect(r, rad);
-        using (var bg = new SolidBrush(Theme.BgSurface)) g.FillPath(bg, path);
-        Gfx.DrawTopSheen(g, r, rad);
-        using (var pen = new Pen(Theme.BgBorder, 1f)) g.DrawPath(pen, path);
+        Gfx.FillAndStrokeRect(g, r, 2, Theme.BrushSheet, Theme.PenRule);
     }
 }
 
 /// <summary>
-/// Elevated live audio header card displaying active Output (+ Comm) and Input devices with
-/// crisp vector icons and a one-click interactive microphone mute pill.
+/// Printed ledger live-status card showing active Output (+ Comm) and Input devices with
+/// crisp vector icons and a one-click square-cornered LIVE / MUTED stamp.
 /// </summary>
 internal sealed class LiveNowPanel : Control
 {
@@ -503,7 +621,7 @@ internal sealed class LiveNowPanel : Control
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.BgMain;
+        BackColor = Theme.Paper;
         Height = 76;
     }
 
@@ -522,9 +640,9 @@ internal sealed class LiveNowPanel : Control
     private Rectangle CardRect()
     {
         float k = Math.Max(1f, DeviceDpi / 96f);
-        int padX = (int)Math.Round(16 * k);
-        int padTop = (int)Math.Round(2 * k);
-        int padBot = (int)Math.Round(6 * k);
+        int padX = (int)Math.Round(14 * k);
+        int padTop = (int)Math.Round(8 * k);
+        int padBot = (int)Math.Round(4 * k);
         return new Rectangle(padX, padTop, Math.Max(20, Width - padX * 2 - 1), Math.Max(20, Height - padTop - padBot - 1));
     }
 
@@ -532,7 +650,7 @@ internal sealed class LiveNowPanel : Control
     {
         var c = CardRect();
         int mid = c.Y + c.Height / 2;
-        return new Rectangle(c.X + 4, mid + 2, c.Width - 8, c.Bottom - mid - 5);
+        return new Rectangle(c.X + 1, mid + 1, c.Width - 2, c.Bottom - mid - 2);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -570,120 +688,112 @@ internal sealed class LiveNowPanel : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
         float k = Math.Max(1f, DeviceDpi / 96f);
         int P(int v) => (int)Math.Round(v * k);
 
         var card = CardRect();
-        int rad = P(11);
-        using var cardPath = Gfx.RoundRect(card, rad);
-        using (var bg = new LinearGradientBrush(card, Theme.BgCardTop, Theme.BgSurface, 90f))
-            g.FillPath(bg, cardPath);
-        Gfx.DrawTopSheen(g, card, rad);
-
-        var borderColor = _micMuted ? Color.FromArgb(130, Theme.Danger) : Theme.BgBorder;
-        using (var pen = new Pen(borderColor, 1f))
-            g.DrawPath(pen, cardPath);
+        Gfx.FillAndStrokeRect(g, card, 2, Theme.BrushSheet, _micMuted ? Theme.PenVermilion : Theme.PenRule);
 
         int midY = card.Y + card.Height / 2;
-        using (var div = new Pen(Color.FromArgb(26, 255, 255, 255), 1f))
-            g.DrawLine(div, card.X + P(12), midY, card.Right - P(12), midY);
 
-        // ---- Row 1: Output ----
-        int row1H = midY - card.Y;
-        var spkRect = new RectangleF(card.X + P(12), card.Y + (row1H - P(14)) / 2f, P(14), P(14));
-        Gfx.DrawSpeakerIcon(g, spkRect, Theme.AccentEnd);
-
-        int textLeft = card.X + P(34);
-        int outRight = card.Right - P(10);
-
-        if (!string.IsNullOrEmpty(_commShort))
-        {
-            string commLabel = "COMM";
-            int pillW = P(42);
-            var pill = new Rectangle(card.Right - P(10) - pillW, card.Y + (row1H - P(17)) / 2, pillW, P(17));
-            using var pp = Gfx.RoundRect(pill, P(8));
-            using (var pb = new SolidBrush(Theme.AccentSoft)) g.FillPath(pb, pp);
-            TextRenderer.DrawText(g, commLabel, Theme.MicroBold, pill, Theme.AccentEnd,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-            outRight = pill.X - P(6);
-        }
-
-        var outTextRect = new Rectangle(textLeft, card.Y, Math.Max(P(20), outRight - textLeft), row1H);
-        TextRenderer.DrawText(g, _outText, Theme.BodyBold, outTextRect, Theme.TextPrimary,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-
-        // ---- Row 2: Input (interactive click-to-mute) ----
+        // Hover wash on the interactive mic row (drawn beneath border & divider)
         var micRow = MicRowRect();
         if (_hoverMicRow)
         {
-            using var hp = Gfx.RoundRect(micRow, P(7));
-            using var hb = new SolidBrush(_micMuted ? Theme.DangerSoft : Color.FromArgb(22, 255, 255, 255));
-            g.FillPath(hb, hp);
+            g.FillRectangle(Theme.BrushPressedPaper, micRow);
         }
 
-        int row2H = card.Bottom - midY;
-        var micIconRect = new RectangleF(card.X + P(12), midY + (row2H - P(14)) / 2f, P(14), P(14));
-        Gfx.DrawMicIcon(g, micIconRect, _micMuted ? Theme.Danger : Theme.Success, muted: _micMuted);
+        // Hairline ledger divider between Output and Input
+        g.DrawLine(Theme.PenRule, card.X + 1, midY, card.Right - 1, midY);
 
-        int badgeW = _micMuted ? P(56) : P(44);
-        var statusPill = new Rectangle(card.Right - P(10) - badgeW, midY + (row2H - P(18)) / 2, badgeW, P(18));
-        using (var sp = Gfx.RoundRect(statusPill, P(9)))
+        // ---- Row 1: Output ----
+        int row1H = midY - card.Y;
+        var spkRect = new RectangleF(card.X + P(10), card.Y + (row1H - P(14)) / 2f, P(14), P(14));
+        Gfx.DrawSpeakerIcon(g, spkRect, Theme.Ink);
+
+        int textLeft = card.X + P(30);
+        int outRight = card.Right - P(8);
+
+        if (!string.IsNullOrEmpty(_commShort))
         {
-            using var sb = new SolidBrush(_micMuted ? Theme.DangerSoft : Theme.SuccessSoft);
-            g.FillPath(sb, sp);
-            using var spen = new Pen(Color.FromArgb(110, _micMuted ? Theme.Danger : Theme.Success), 1f);
-            g.DrawPath(spen, sp);
+            int tagW = P(42);
+            var tagRect = new Rectangle(card.Right - P(8) - tagW, card.Y + (row1H - P(16)) / 2, tagW, P(16));
+            Gfx.FillAndStrokeRect(g, tagRect, 1, Theme.BrushPaper, Theme.PenRule);
+            TextRenderer.DrawText(g, "COMM", Theme.MonoSmallBold, tagRect, Theme.Graphite,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            outRight = tagRect.X - P(6);
         }
-        TextRenderer.DrawText(g, _micMuted ? "● MUTED" : "● LIVE", Theme.MicroBold, statusPill,
-            _micMuted ? Theme.Danger : Theme.Success,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
-        var inTextRect = new Rectangle(textLeft, midY, Math.Max(P(20), statusPill.X - P(8) - textLeft), row2H);
-        TextRenderer.DrawText(g, _inText, Theme.Body, inTextRect, _micMuted ? Theme.Danger : Theme.TextSoft,
+        var outTextRect = new Rectangle(textLeft, card.Y, Math.Max(P(20), outRight - textLeft), row1H);
+        TextRenderer.DrawText(g, _outText, Theme.BodyBold, outTextRect, Theme.Ink,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+
+        // ---- Row 2: Input (click-to-mute) ----
+        int row2H = card.Bottom - midY;
+        var micIconRect = new RectangleF(card.X + P(10), midY + (row2H - P(14)) / 2f, P(14), P(14));
+        Gfx.DrawMicIcon(g, micIconRect, _micMuted ? Theme.Vermilion : Theme.FountainGreen, muted: _micMuted);
+
+        int stampW = _micMuted ? P(56) : P(48);
+        var stampRect = new Rectangle(card.Right - P(8) - stampW, midY + (row2H - P(17)) / 2, stampW, P(17));
+        if (_micMuted)
+        {
+            Gfx.FillAndStrokeRect(g, stampRect, 1, Theme.BrushVermilion, Theme.PenVermilion);
+            int sq = Math.Max(4, P(4));
+            g.FillRectangle(Theme.BrushPaper, stampRect.X + P(5), stampRect.Y + (stampRect.Height - sq) / 2, sq, sq);
+            var lblRect = new Rectangle(stampRect.X + P(10), stampRect.Y, stampRect.Width - P(11), stampRect.Height);
+            TextRenderer.DrawText(g, "MUTED", Theme.MonoSmallBold, lblRect, Theme.Paper,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+        else
+        {
+            Gfx.FillAndStrokeRect(g, stampRect, 1, Theme.BrushPaper, Theme.PenFountainGreen);
+            int sq = Math.Max(4, P(4));
+            g.FillRectangle(Theme.BrushFountainGreen, stampRect.X + P(5), stampRect.Y + (stampRect.Height - sq) / 2, sq, sq);
+            var lblRect = new Rectangle(stampRect.X + P(10), stampRect.Y, stampRect.Width - P(11), stampRect.Height);
+            TextRenderer.DrawText(g, "LIVE", Theme.MonoSmallBold, lblRect, Theme.FountainGreen,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+
+        var inTextRect = new Rectangle(textLeft, midY, Math.Max(P(20), stampRect.X - P(8) - textLeft), row2H);
+        TextRenderer.DrawText(g, _inText, Theme.Body, inTextRect, _micMuted ? Theme.Vermilion : Theme.Graphite,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
     }
 }
 
-/// <summary>Dark renderer for system tray and card ContextMenuStrips.</summary>
+/// <summary>Editorial E-Ink renderer for system tray and profile card ContextMenuStrips.</summary>
 internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 {
-    public DarkMenuRenderer() : base(new DarkColorTable()) { }
+    public DarkMenuRenderer() : base(new EditorialColorTable()) { }
 
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
     {
-        using var b = new SolidBrush(Theme.BgCard);
-        e.Graphics.FillRectangle(b, e.AffectedBounds);
+        e.Graphics.FillRectangle(Theme.BrushPaper, e.AffectedBounds);
     }
 
     protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
     {
-        using var b = new SolidBrush(Theme.BgCard);
-        e.Graphics.FillRectangle(b, e.AffectedBounds);
+        e.Graphics.FillRectangle(Theme.BrushPaper, e.AffectedBounds);
     }
 
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
     {
-        using var p = new Pen(Theme.BgBorderStrong);
-        e.Graphics.DrawRectangle(p, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
+        e.Graphics.DrawRectangle(Theme.PenInk, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
     }
 
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
     {
-        var r = new Rectangle(3, 1, e.Item.Width - 6, e.Item.Height - 2);
+        var r = new Rectangle(2, 1, e.Item.Width - 4, e.Item.Height - 2);
         if (e.Item.Selected && e.Item.Enabled)
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var p = Gfx.RoundRect(r, 5);
-            using var b = new SolidBrush(Theme.BgElevated);
-            e.Graphics.FillPath(b, p);
+            e.Graphics.FillRectangle(Theme.BrushPressedPaper, r);
+            e.Graphics.DrawRectangle(Theme.PenRule, r);
         }
         else
         {
-            using var b = new SolidBrush(Theme.BgCard);
-            e.Graphics.FillRectangle(b, e.Item.ContentRectangle);
+            e.Graphics.FillRectangle(Theme.BrushPaper, e.Item.ContentRectangle);
         }
     }
 
@@ -692,46 +802,58 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
         bool isShortcut = e.Item is ToolStripMenuItem mi &&
                           !string.IsNullOrEmpty(mi.ShortcutKeyDisplayString) &&
                           string.Equals(e.Text, mi.ShortcutKeyDisplayString, StringComparison.Ordinal);
-        e.TextColor = !e.Item.Enabled ? Theme.TextMuted : (isShortcut ? Theme.TextMuted : Theme.TextPrimary);
+        if (!e.Item.Enabled)
+        {
+            e.TextColor = Theme.Graphite;
+        }
+        else if (isShortcut)
+        {
+            e.TextColor = Theme.Graphite;
+            e.TextFont = Theme.MonoSmall;
+        }
+        else if (e.Item.ForeColor != Theme.Ink && e.Item.ForeColor != SystemColors.ControlText)
+        {
+            e.TextColor = e.Item.ForeColor;
+        }
+        else
+        {
+            e.TextColor = Theme.Ink;
+        }
         base.OnRenderItemText(e);
     }
 
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
     {
-        e.ArrowColor = e.Item?.Enabled == true ? Theme.TextSoft : Theme.TextMuted;
+        e.ArrowColor = e.Item?.Enabled == true ? Theme.Ink : Theme.Graphite;
         base.OnRenderArrow(e);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
     {
         int y = e.Item.Height / 2;
-        using var p = new Pen(Theme.BgBorder);
-        e.Graphics.DrawLine(p, 8, y, e.Item.Width - 8, y);
+        e.Graphics.DrawLine(Theme.PenRule, 6, y, e.Item.Width - 6, y);
     }
 
     protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
         var r = e.ImageRectangle;
-        var dot = new Rectangle(r.X + (r.Width - 8) / 2, r.Y + (r.Height - 8) / 2, 8, 8);
-        using var b = new SolidBrush(Theme.AccentEnd);
-        g.FillEllipse(b, dot);
+        var sq = new Rectangle(r.X + (r.Width - 6) / 2, r.Y + (r.Height - 6) / 2, 6, 6);
+        e.Graphics.FillRectangle(Theme.BrushVermilion, sq);
     }
 
-    private sealed class DarkColorTable : ProfessionalColorTable
+    private sealed class EditorialColorTable : ProfessionalColorTable
     {
-        public override Color ToolStripDropDownBackground => Theme.BgCard;
-        public override Color MenuBorder => Theme.BgBorderStrong;
-        public override Color MenuItemBorder => Theme.BgElevated;
-        public override Color MenuItemSelected => Theme.BgElevated;
-        public override Color ImageMarginGradientBegin => Theme.BgCard;
-        public override Color ImageMarginGradientMiddle => Theme.BgCard;
-        public override Color ImageMarginGradientEnd => Theme.BgCard;
+        public override Color ToolStripDropDownBackground => Theme.Paper;
+        public override Color MenuBorder => Theme.StrongBorder;
+        public override Color MenuItemBorder => Theme.Rule;
+        public override Color MenuItemSelected => Theme.PressedPaper;
+        public override Color ImageMarginGradientBegin => Theme.Paper;
+        public override Color ImageMarginGradientMiddle => Theme.Paper;
+        public override Color ImageMarginGradientEnd => Theme.Paper;
     }
 }
 
-/// <summary>Tray &amp; window icons drawn/loaded at startup.</summary>
+/// <summary>Tray &amp; window icons rendered in the Editorial E-Ink stamp aesthetic.</summary>
 internal static class TrayIcons
 {
     public static readonly Icon Normal = Create(false);
@@ -762,23 +884,22 @@ internal static class TrayIcons
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Theme.ConfigureGraphics(g);
             g.Clear(Color.Transparent);
-            Gfx.DrawAppEmblem(g, new RectangleF(0.5f, 0.5f, 30f, 30f));
+            Gfx.DrawAppEmblem(g, new RectangleF(1f, 1f, 30f, 30f));
 
             if (muted)
             {
-                using var red = new SolidBrush(Theme.Danger);
-                using var ring = new Pen(Color.White, 2f);
-                g.FillEllipse(red, 18, 18, 13, 13);
-                g.DrawEllipse(ring, 18, 18, 13, 13);
+                using var ring = new Pen(Theme.Paper, 2f);
+                g.FillRectangle(Theme.BrushVermilion, 18, 18, 12, 12);
+                g.DrawRectangle(ring, 18, 18, 12, 12);
             }
         }
         return Icon.FromHandle(bmp.GetHicon());
     }
 }
 
-/// <summary>Smoothly animated modern pill toggle switch with indigo-violet gradient track.</summary>
+/// <summary>Tactile rectangular E-Ink toggle switch (zero gradients, zero pill rounding).</summary>
 internal sealed class ToggleSwitch : Control
 {
     private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 15 };
@@ -792,21 +913,21 @@ internal sealed class ToggleSwitch : Control
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
                  ControlStyles.Selectable, true);
         Cursor = Cursors.Hand;
-        Size = new Size(42, 22);
+        Size = new Size(38, 20);
         TabStop = true;
 
         _animTimer.Tick += (_, _) =>
         {
             float target = _checked ? 1f : 0f;
             float diff = target - _thumbProgress;
-            if (Math.Abs(diff) < 0.04f)
+            if (Math.Abs(diff) < 0.05f)
             {
                 _thumbProgress = target;
                 _animTimer.Stop();
             }
             else
             {
-                _thumbProgress += diff * 0.38f;
+                _thumbProgress += diff * 0.42f;
             }
             Invalidate();
         };
@@ -844,42 +965,25 @@ internal sealed class ToggleSwitch : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgSurface);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Sheet);
 
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
-        int rad = Height / 2;
-        using var track = Gfx.RoundRect(r, rad);
+        bool on = _thumbProgress >= 0.5f;
 
-        using (var offBrush = new SolidBrush(Theme.BgBorder))
-            g.FillPath(offBrush, track);
+        Gfx.FillAndStrokeRect(
+            g,
+            r,
+            2,
+            on ? Theme.BrushInk : Theme.BrushPaper,
+            on || Focused ? Theme.PenInk : Theme.PenGraphite);
 
-        if (_thumbProgress > 0.01f)
-        {
-            int alpha = Math.Clamp((int)Math.Round(_thumbProgress * 255f), 0, 255);
-            using var onGrad = new LinearGradientBrush(
-                r,
-                Color.FromArgb(alpha, Theme.Accent),
-                Color.FromArgb(alpha, Theme.AccentEnd),
-                0f);
-            g.FillPath(onGrad, track);
-        }
+        int pad = Math.Max(3, Height / 6);
+        int size = Math.Max(8, Height - 1 - pad * 2);
+        int x = (int)Math.Round(pad + (Width - 1 - pad * 2 - size) * _thumbProgress);
+        var knobRect = new Rectangle(x, pad, size, size);
 
-        int pad = Math.Max(3, Height / 7);
-        int d = Math.Max(8, Height - 1 - pad * 2);
-        float x = pad + (Width - 1 - pad * 2 - d) * _thumbProgress;
-
-        using (var shadow = new SolidBrush(Color.FromArgb(55, 0, 0, 0)))
-            g.FillEllipse(shadow, x, pad + 1f, d, d);
-
-        using (var knob = new SolidBrush(Color.White))
-            g.FillEllipse(knob, x, pad, d, d);
-
-        if (Focused && ShowFocusCues)
-        {
-            using var p = new Pen(Theme.AccentEnd, 1.2f);
-            g.DrawPath(p, track);
-        }
+        Gfx.FillRect(g, knobRect, 1, on ? Theme.BrushPaper : Theme.BrushGraphite);
     }
 
     protected override void Dispose(bool disposing)
@@ -889,7 +993,7 @@ internal sealed class ToggleSwitch : Control
     }
 }
 
-/// <summary>Custom dark horizontal 0..100% slider with gradient fill, glow halo, wheel, and keyboard support.</summary>
+/// <summary>Tactile flat hairline horizontal slider with crisp square ink thumb.</summary>
 internal sealed class DarkSlider : Control
 {
     private int _min;
@@ -935,11 +1039,11 @@ internal sealed class DarkSlider : Control
         }
     }
 
-    private int ThumbRadius => Math.Max(5, Height / 3 - 1);
+    private int ThumbHalfW => Math.Max(4, Height / 5);
 
     private void SetFromX(int x)
     {
-        int pad = ThumbRadius + 3;
+        int pad = ThumbHalfW + 2;
         int usable = Math.Max(1, Width - pad * 2);
         double ratio = Math.Clamp((x - pad) / (double)usable, 0.0, 1.0);
         Value = _min + (int)Math.Round(ratio * (_max - _min));
@@ -1006,58 +1110,38 @@ internal sealed class DarkSlider : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
-        int r = ThumbRadius;
-        int pad = r + 3;
-        int trackH = Math.Max(4, Height / 5);
+        int hw = ThumbHalfW;
+        int hh = Math.Max(6, Height / 3);
+        int pad = hw + 2;
+        int trackH = 2;
         int trackY = (Height - trackH) / 2;
         int usable = Math.Max(1, Width - pad * 2);
         double ratio = (_value - _min) / (double)Math.Max(1, _max - _min);
         int thumbX = pad + (int)Math.Round(ratio * usable);
 
-        var bgTrack = new Rectangle(pad, trackY, usable, trackH);
-        using (var path = Gfx.RoundRect(bgTrack, trackH / 2))
-        using (var b = new SolidBrush(Theme.BgBorder))
-            g.FillPath(b, path);
+        g.FillRectangle(Theme.BrushRule, pad, trackY, usable, trackH);
 
         int fillW = thumbX - pad;
-        if (fillW > 2)
+        if (fillW > 0)
         {
-            var fgTrack = new Rectangle(pad, trackY, fillW, trackH);
-            if (Enabled)
-            {
-                Gfx.FillGradientRoundRect(g, fgTrack, trackH / 2, Theme.Accent, Theme.AccentEnd, 0f);
-            }
-            else
-            {
-                using var path = Gfx.RoundRect(fgTrack, trackH / 2);
-                using var b = new SolidBrush(Theme.TextMuted);
-                g.FillPath(b, path);
-            }
+            g.FillRectangle(Enabled ? Theme.BrushInk : Theme.BrushGraphite, pad, trackY, fillW, trackH);
         }
 
-        if (Enabled && (_hover || _dragging || (Focused && ShowFocusCues)))
-        {
-            var halo = new Rectangle(thumbX - r - 3, Height / 2 - r - 3, (r + 3) * 2, (r + 3) * 2);
-            using var hb = new SolidBrush(Theme.AccentSoft);
-            g.FillEllipse(hb, halo);
-        }
-
-        var knobRect = new Rectangle(thumbX - r, Height / 2 - r, r * 2, r * 2);
-        using (var knob = new SolidBrush(Enabled ? Color.White : Theme.TextMuted))
-            g.FillEllipse(knob, knobRect);
-
-        if (Enabled)
-        {
-            using var ring = new Pen(_dragging ? Theme.AccentEnd : Theme.Accent, 1.4f);
-            g.DrawEllipse(ring, knobRect);
-        }
+        var knobRect = new Rectangle(thumbX - hw, Height / 2 - hh, hw * 2, hh * 2);
+        var knobFill = !Enabled
+            ? Theme.BrushPressedPaper
+            : (_dragging ? Theme.BrushVermilion : (_hover ? Theme.BrushPressedPaper : Theme.BrushSheet));
+        var knobPen = !Enabled
+            ? Theme.PenRule
+            : (_dragging ? Theme.PenVermilion : Theme.PenInk);
+        Gfx.FillAndStrokeRect(g, knobRect, 1, knobFill, knobPen);
     }
 }
 
-/// <summary>Custom-painted dark checklist with rounded gradient checkboxes, wheel scroll, and keyboard navigation.</summary>
+/// <summary>Crisp Editorial E-Ink checklist with square ink checkboxes, wheel scroll, and keyboard navigation.</summary>
 internal sealed class DarkCheckedList : Control
 {
     private sealed class Entry(DeviceItem item, bool isChecked)
@@ -1076,15 +1160,15 @@ internal sealed class DarkCheckedList : Control
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
                  ControlStyles.Selectable, true);
-        BackColor = Theme.BgCard;
-        ForeColor = Theme.TextPrimary;
+        BackColor = Theme.Sheet;
+        ForeColor = Theme.Ink;
         Font = Theme.Body;
         Cursor = Cursors.Hand;
         TabStop = true;
     }
 
     private float ScaleFactor => Math.Max(1f, DeviceDpi / 96f);
-    private int RowHeight => (int)Math.Round(30 * ScaleFactor);
+    private int RowHeight => (int)Math.Round(28 * ScaleFactor);
 
     public void AddItem(DeviceItem item, bool isChecked)
     {
@@ -1221,73 +1305,66 @@ internal sealed class DarkCheckedList : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
         float k = ScaleFactor;
         var outer = new Rectangle(0, 0, Width - 1, Height - 1);
-        int rad = (int)Math.Round(8 * k);
-        using var outerPath = Gfx.RoundRect(outer, rad);
-        using (var bg = new SolidBrush(Theme.BgSurface)) g.FillPath(bg, outerPath);
+        Gfx.FillRect(g, outer, 2, Theme.BrushSheet);
 
         var clipState = g.Save();
-        g.SetClip(new Rectangle(3, 3, Width - 6, Height - 6));
+        g.SetClip(new Rectangle(2, 2, Width - 4, Height - 4));
 
         if (_entries.Count == 0)
         {
-            TextRenderer.DrawText(g, "No devices available", Theme.Small,
-                new Rectangle(8, 3, Width - 16, Height - 6), Theme.TextMuted,
+            TextRenderer.DrawText(g, "NO DEVICES AVAILABLE", Theme.MonoSmall,
+                new Rectangle(8, 3, Width - 16, Height - 6), Theme.Graphite,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
         else
         {
             int rowH = RowHeight;
-            int boxSize = (int)Math.Round(16 * k);
+            int boxSize = (int)Math.Round(14 * k);
             int padLeft = (int)Math.Round(10 * k);
-            int scrollBarSpace = MaxScroll > 0 ? (int)Math.Round(9 * k) : 0;
+            int scrollBarSpace = MaxScroll > 0 ? (int)Math.Round(8 * k) : 0;
 
             for (int i = 0; i < _entries.Count; i++)
             {
                 int y = 3 + i * rowH - _scrollOffset;
                 if (y + rowH < 3 || y > Height - 3) continue;
 
-                var rowRect = new Rectangle(4, y + 1, Width - 8 - scrollBarSpace, rowH - 2);
+                var rowRect = new Rectangle(3, y + 1, Width - 6 - scrollBarSpace, rowH - 2);
                 if (i == _hoverIndex || (Focused && i == _focusIndex))
                 {
-                    using var hPath = Gfx.RoundRect(rowRect, (int)Math.Round(6 * k));
-                    using var hb = new SolidBrush(Theme.BgCardHover);
-                    g.FillPath(hb, hPath);
+                    g.FillRectangle(Theme.BrushPressedPaper, rowRect);
                 }
 
                 var entry = _entries[i];
                 var boxRect = new Rectangle(padLeft, y + (rowH - boxSize) / 2, boxSize, boxSize);
-                int boxRad = (int)Math.Round(5 * k);
                 if (entry.Checked)
                 {
-                    Gfx.FillGradientRoundRect(g, boxRect, boxRad, Theme.Accent, Theme.AccentEnd, 135f);
-                    using var checkPen = new Pen(Color.White, Math.Max(1.6f, 1.7f * k))
+                    Gfx.FillAndStrokeRect(g, boxRect, 1, Theme.BrushInk, Theme.PenInk);
+                    using var checkPen = new Pen(Theme.Paper, Math.Max(1.5f, 1.6f * k))
                     {
-                        StartCap = LineCap.Round,
-                        EndCap = LineCap.Round,
-                        LineJoin = LineJoin.Round
+                        StartCap = LineCap.Square,
+                        EndCap = LineCap.Square,
+                        LineJoin = LineJoin.Miter
                     };
-                    var p1 = new PointF(boxRect.X + boxSize * 0.24f, boxRect.Y + boxSize * 0.53f);
-                    var p2 = new PointF(boxRect.X + boxSize * 0.44f, boxRect.Y + boxSize * 0.72f);
-                    var p3 = new PointF(boxRect.X + boxSize * 0.78f, boxRect.Y + boxSize * 0.30f);
+                    var p1 = new PointF(boxRect.X + boxSize * 0.22f, boxRect.Y + boxSize * 0.54f);
+                    var p2 = new PointF(boxRect.X + boxSize * 0.44f, boxRect.Y + boxSize * 0.74f);
+                    var p3 = new PointF(boxRect.X + boxSize * 0.80f, boxRect.Y + boxSize * 0.28f);
                     g.DrawLines(checkPen, new[] { p1, p2, p3 });
                 }
                 else
                 {
-                    using var boxPath = Gfx.RoundRect(boxRect, boxRad);
-                    using var pen = new Pen(Theme.BgBorderStrong, 1.2f);
-                    g.DrawPath(pen, boxPath);
+                    Gfx.FillAndStrokeRect(g, boxRect, 1, Theme.BrushSheet, Theme.PenGraphite);
                 }
 
-                int textX = boxRect.Right + (int)Math.Round(10 * k);
+                int textX = boxRect.Right + (int)Math.Round(9 * k);
                 var textRect = new Rectangle(textX, y, Math.Max(20, rowRect.Right - textX - 6), rowH);
                 var textColor = !entry.Item.Connected
-                    ? Theme.Warning
-                    : (entry.Checked ? Theme.TextPrimary : Theme.TextSoft);
+                    ? Theme.Vermilion
+                    : (entry.Checked ? Theme.Ink : Theme.Graphite);
                 TextRenderer.DrawText(g, entry.Item.ToString(), Font, textRect, textColor,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
                     TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
@@ -1299,21 +1376,17 @@ internal sealed class DarkCheckedList : Control
                 int totalH = _entries.Count * rowH;
                 int thumbH = Math.Max((int)Math.Round(18 * k), (int)Math.Round(viewH * (viewH / (double)totalH)));
                 int thumbY = 5 + (int)Math.Round((viewH - thumbH) * (_scrollOffset / (double)MaxScroll));
-                var thumbRect = new Rectangle(Width - (int)Math.Round(7 * k), thumbY, (int)Math.Round(3 * k), thumbH);
-                using var sb = new SolidBrush(Theme.BgBorderStrong);
-                using var sp = Gfx.RoundRect(thumbRect, 2);
-                g.FillPath(sb, sp);
+                var thumbRect = new Rectangle(Width - (int)Math.Round(6 * k), thumbY, Math.Max(3, (int)Math.Round(3 * k)), thumbH);
+                g.FillRectangle(Theme.BrushGraphite, thumbRect);
             }
         }
 
         g.Restore(clipState);
-
-        using var borderPen = new Pen(Focused ? Theme.Accent : Theme.BgBorder, 1f);
-        g.DrawPath(borderPen, outerPath);
+        Gfx.StrokeRect(g, outer, 2, Focused ? Theme.PenInk : Theme.PenRule);
     }
 }
 
-/// <summary>Dark owner-drawn combo with custom WM_PAINT border and vector chevron (zero legacy Win32 gray chrome).</summary>
+/// <summary>Flat Editorial E-Ink owner-drawn combo box with crisp ink chevron and Pressed Paper highlight.</summary>
 internal sealed class DarkCombo : ComboBox
 {
     private const int WM_PAINT = 0x000F;
@@ -1324,8 +1397,8 @@ internal sealed class DarkCombo : ComboBox
         DrawMode = DrawMode.OwnerDrawFixed;
         DropDownStyle = ComboBoxStyle.DropDownList;
         FlatStyle = FlatStyle.Flat;
-        BackColor = Theme.BgCard;
-        ForeColor = Theme.TextPrimary;
+        BackColor = Theme.Sheet;
+        ForeColor = Theme.Ink;
         Font = Theme.Body;
         ItemHeight = 24;
         Cursor = Cursors.Hand;
@@ -1342,12 +1415,10 @@ internal sealed class DarkCombo : ComboBox
         bool isDropdownItem = (e.State & DrawItemState.ComboBoxEdit) == 0;
         bool highlighted = isDropdownItem && (e.State & DrawItemState.Selected) != 0;
 
-        using (var bg = new SolidBrush(highlighted ? Theme.Accent : Theme.BgCard))
-            e.Graphics.FillRectangle(bg, e.Bounds);
+        e.Graphics.FillRectangle(highlighted ? Theme.BrushPressedPaper : Theme.BrushSheet, e.Bounds);
 
         var text = Items[e.Index]?.ToString() ?? "";
-        var color = highlighted ? Color.White : Theme.TextPrimary;
-        TextRenderer.DrawText(e.Graphics, text, Font, Rectangle.Inflate(e.Bounds, -8, 0), color,
+        TextRenderer.DrawText(e.Graphics, text, Font, Rectangle.Inflate(e.Bounds, -8, 0), Theme.Ink,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
@@ -1357,32 +1428,27 @@ internal sealed class DarkCombo : ComboBox
         if (m.Msg != WM_PAINT || Width <= 4 || Height <= 4) return;
 
         using var g = Graphics.FromHwnd(Handle);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
+        Theme.ConfigureGraphics(g);
 
         float k = Math.Max(1f, DeviceDpi / 96f);
         int arrowAreaW = (int)Math.Round(24 * k);
 
-        // Paint over Win32's default light-gray dropdown button area
         var arrowRect = new Rectangle(Width - arrowAreaW, 1, arrowAreaW - 1, Height - 2);
-        using (var bg = new SolidBrush(_hover ? Theme.BgElevated : Theme.BgCard))
-            g.FillRectangle(bg, arrowRect);
+        g.FillRectangle(_hover ? Theme.BrushPressedPaper : Theme.BrushSheet, arrowRect);
 
-        // Clean border covering legacy Win32 square chrome
         var outer = new Rectangle(0, 0, Width - 1, Height - 1);
-        using (var cover = new Pen(Theme.BgCard, 2f))
+        using (var cover = new Pen(Theme.Sheet, 2f))
             g.DrawRectangle(cover, 1, 1, Width - 3, Height - 3);
-        using (var border = new Pen(Focused ? Theme.Accent : (_hover ? Theme.BgBorderStrong : Theme.BgBorder), 1f))
-            g.DrawRectangle(border, outer);
+        g.DrawRectangle(Focused || _hover ? Theme.PenInk : Theme.PenRule, outer);
 
-        // Anti-aliased downward chevron
         float cx = arrowRect.X + arrowRect.Width * 0.5f;
         float cy = arrowRect.Y + arrowRect.Height * 0.52f;
-        float sz = 3.5f * k;
-        using var chev = new Pen(_hover || Focused ? Theme.TextPrimary : Theme.TextMuted, Math.Max(1.4f, 1.4f * k))
+        float sz = 3.4f * k;
+        using var chev = new Pen(_hover || Focused ? Theme.Ink : Theme.Graphite, Math.Max(1.3f, 1.35f * k))
         {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round,
-            LineJoin = LineJoin.Round
+            StartCap = LineCap.Flat,
+            EndCap = LineCap.Flat,
+            LineJoin = LineJoin.Miter
         };
         g.DrawLines(chev, new[]
         {
@@ -1394,9 +1460,9 @@ internal sealed class DarkCombo : ComboBox
 }
 
 /// <summary>
-/// Modern rounded audio profile card with gradient elevation, glowing active capsule,
-/// keycap slot badge, micro-pill device tags, volume pills, auto-activate bolt badge,
-/// drag grip dots, hover Edit/Delete pills, and dark right-click context menu.
+/// Editorial E-Ink profile ledger card: flat #FFFFFF sheet, 1px hairline border (#1A1A18 on hover/active),
+/// Pressed Paper hover fill, 3px Stamp Vermilion left bar and uppercase monospace ACTIVE stamp when live,
+/// Georgia serif title, Graphite Segoe UI device sublabels, and bordered monospace hotkey keycap badge.
 /// </summary>
 internal sealed class CardControl : Control
 {
@@ -1430,13 +1496,13 @@ internal sealed class CardControl : Control
                  ControlStyles.Selectable, true);
         TabStop = true;
         Cursor = Cursors.Hand;
-        BackColor = Theme.BgMain;
+        BackColor = Theme.Paper;
 
         _confirmTimer.Tick += (_, _) => { _confirmTimer.Stop(); _confirmDelete = false; Invalidate(); };
 
         _contextMenu.Renderer = new DarkMenuRenderer();
-        _contextMenu.BackColor = Theme.BgCard;
-        _contextMenu.ForeColor = Theme.TextPrimary;
+        _contextMenu.BackColor = Theme.Paper;
+        _contextMenu.ForeColor = Theme.Ink;
         _contextMenu.Font = Theme.Body;
         _contextMenu.Opening += (_, _) => PopulateContextMenu();
         ContextMenuStrip = _contextMenu;
@@ -1448,8 +1514,14 @@ internal sealed class CardControl : Control
         Invalidate();
     }
 
-    public int PreferredHeight(float scale) =>
-        Card.CommOutputId.HasValue ? (int)Math.Round(106 * scale) : (int)Math.Round(86 * scale);
+    private bool HasMetaRow => !string.IsNullOrEmpty(_slotText) || Card.AutoActivate || _isFallback;
+
+    public int PreferredHeight(float scale)
+    {
+        int baseH = Card.CommOutputId.HasValue ? 100 : 80;
+        if (HasMetaRow) baseH += 24;
+        return (int)Math.Round(baseH * scale);
+    }
 
     public bool IsActive { get => _isActive; set => Upd(ref _isActive, value); }
     public bool IsFallback { get => _isFallback; set => Upd(ref _isFallback, value); }
@@ -1457,6 +1529,7 @@ internal sealed class CardControl : Control
     public bool CommMissing { get => _commMissing; set => Upd(ref _commMissing, value); }
     public bool InMissing { get => _inMissing; set => Upd(ref _inMissing, value); }
 
+    /// <summary>Assigned hotkey badge text (e.g. "CTRL+SHIFT+1"), rendered in a bordered monospace keycap.</summary>
     public string? SlotText
     {
         get => _slotText;
@@ -1488,12 +1561,14 @@ internal sealed class CardControl : Control
         items.Add(fbItem);
 
         items.Add(new ToolStripSeparator());
-        items.Add("Delete", null, (_, _) =>
+        var delItem = new ToolStripMenuItem("Delete") { ForeColor = Theme.Vermilion };
+        delItem.Click += (_, _) =>
         {
             _confirmTimer.Stop();
             _confirmDelete = false;
             DeleteRequested?.Invoke(Card);
-        });
+        };
+        items.Add(delItem);
     }
 
     private int P(int v) => (int)Math.Round(v * Scale);
@@ -1501,14 +1576,14 @@ internal sealed class CardControl : Control
 
     private Rectangle DelRect()
     {
-        int w = _confirmDelete ? P(66) : P(26);
-        return new Rectangle(Width - P(11) - w, P(10), w, P(24));
+        int w = _confirmDelete ? P(66) : P(24);
+        return new Rectangle(Width - P(10) - w, P(9), w, P(22));
     }
 
     private Rectangle EditRect()
     {
         var d = DelRect();
-        return new Rectangle(d.X - P(5) - P(42), P(10), P(42), P(24));
+        return new Rectangle(d.X - P(4) - P(44), P(9), P(44), P(22));
     }
 
     private void HandleDelete()
@@ -1609,104 +1684,105 @@ internal sealed class CardControl : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
-        int rad = P(12);
-        using var path = Gfx.RoundRect(r, rad);
+        var fill = _hover ? Theme.BrushPressedPaper : Theme.BrushSheet;
+        var borderPen = (_isActive || _hover || (_keyboardFocus && Focused)) ? Theme.PenInk : Theme.PenRule;
+        Gfx.FillRect(g, r, 2, fill);
 
-        // Layered gradient surface
-        var topCol = _hover ? Theme.BgElevated : (_isActive ? Color.FromArgb(30, 34, 52) : Theme.BgCardTop);
-        var botCol = _hover ? Theme.BgCardHover : (_isActive ? Color.FromArgb(22, 25, 39) : Theme.BgCard);
-        using (var bg = new LinearGradientBrush(r, topCol, botCol, 90f))
-            g.FillPath(bg, path);
-
-        // Ambient indigo wash on active cards
+        // Active card: crisp 3px vertical Stamp Vermilion left accent strip flush inside the card edge
         if (_isActive)
         {
-            var state = g.Save();
-            g.SetClip(path);
-            using var wash = new LinearGradientBrush(
-                new Rectangle(0, 0, Math.Max(40, Width / 2), Height),
-                Color.FromArgb(36, Theme.Accent),
-                Color.FromArgb(0, Theme.Accent),
-                0f);
-            g.FillRectangle(wash, 0, 0, Math.Max(40, Width / 2), Height);
-
-            // Glowing vertical accent capsule
-            var barRect = new Rectangle(P(6), P(12), Math.Max(3, P(3)), Height - P(24));
-            Gfx.FillGradientRoundRect(g, barRect, 2, Theme.Accent, Theme.AccentEnd, 90f);
-            g.Restore(state);
+            int barW = Math.Max(3, P(3));
+            g.FillRectangle(Theme.BrushVermilion, 1, 1, barW, Math.Max(2, Height - 2));
         }
 
-        Gfx.DrawTopSheen(g, r, rad);
+        Gfx.StrokeRect(g, r, 2, borderPen);
 
-        var borderColor = _isActive
-            ? Color.FromArgb(170, Theme.Accent)
-            : (_hover || (_keyboardFocus && Focused) ? Theme.BgBorderStrong : Theme.BgBorder);
-        using (var pen = new Pen(borderColor, 1f))
-            g.DrawPath(pen, path);
-
-        bool hasSlot = !string.IsNullOrEmpty(_slotText);
-        int left = hasSlot ? P(46) : P(18);
-
-        if (hasSlot)
-        {
-            // Sleek keycap badge for 1-9 jump hotkey
-            var keycap = new Rectangle(P(14), (Height - P(24)) / 2, P(24), P(24));
-            using var kp = Gfx.RoundRect(keycap, P(6));
-            using (var kb = new SolidBrush(_isActive ? Theme.AccentSoft : Theme.BgSurface))
-                g.FillPath(kb, kp);
-            using (var kpen = new Pen(_isActive ? Theme.Accent : Theme.BgBorder, 1f))
-                g.DrawPath(kpen, kp);
-            TextRenderer.DrawText(g, _slotText!, Theme.SmallBold, keycap,
-                _isActive ? Theme.AccentEnd : Theme.TextMuted,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-        }
-        else if (_hover && !_isActive)
-        {
-            // Subtle drag grip dots on hover
-            using var dotBrush = new SolidBrush(Theme.BgBorderStrong);
-            int gx = P(7);
-            int gy = Height / 2 - P(7);
-            int d = Math.Max(2, P(2));
-            for (int row = 0; row < 3; row++)
-            {
-                g.FillEllipse(dotBrush, gx, gy + row * P(5), d, d);
-                g.FillEllipse(dotBrush, gx + P(4), gy + row * P(5), d, d);
-            }
-        }
-
+        int left = P(14);
         bool showButtons = ButtonsVisible;
         int rightBadgeSpace = showButtons
             ? Width - EditRect().X + P(6)
-            : (_isActive ? P(76) : (_isFallback ? P(46) : P(14)));
+            : (_isActive ? P(74) : P(12));
 
+        // ---- Header Row: Georgia Serif Profile Heading ----
         int titleMaxW = Math.Max(P(40), Width - left - rightBadgeSpace);
-        int boltPad = Card.AutoActivate ? P(18) : 0;
-        var titleRect = new Rectangle(left, P(10), Math.Max(P(30), titleMaxW - boltPad), P(24));
-        TextRenderer.DrawText(g, Card.Name, Theme.Title, titleRect, Theme.TextPrimary, TextFlags);
+        var titleRect = new Rectangle(left, P(9), titleMaxW, P(22));
+        TextRenderer.DrawText(g, Card.Name, Theme.CardTitle, titleRect, Theme.Ink, TextFlags);
 
-        if (Card.AutoActivate)
-        {
-            var measured = TextRenderer.MeasureText(g, Card.Name, Theme.Title, titleRect.Size, TextFlags);
-            int boltX = Math.Min(titleRect.Right, left + measured.Width + P(2));
-            Gfx.DrawBoltIcon(g, new RectangleF(boltX, P(15), P(12), P(13)), Theme.Warning);
-        }
+        // ---- Device Rows: Monospace tag + Graphite Segoe UI device name + optional volume ----
+        DrawDeviceRow(g, "OUT", Card.OutputId.HasValue ? Card.OutputName : null, Card.OutputVolume, _outMissing, left, P(36));
 
-        DrawDeviceRow(g, "OUT", Card.OutputId.HasValue ? Card.OutputName : null, Card.OutputVolume, _outMissing, left, P(39));
-
+        int nextY;
         if (Card.CommOutputId.HasValue)
         {
-            DrawDeviceRow(g, "COMM", Card.CommOutputName, null, _commMissing, left, P(60));
-            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(81));
+            DrawDeviceRow(g, "COMM", Card.CommOutputName, null, _commMissing, left, P(56));
+            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(76));
+            nextY = P(98);
         }
         else
         {
-            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(60));
+            DrawDeviceRow(g, "IN", Card.InputId.HasValue ? Card.InputName : null, Card.InputVolume, _inMissing, left, P(56));
+            nextY = P(78);
         }
 
+        // ---- Bottom Meta Strip: Bordered Monospace Keycap Hotkey + AUTO / FALLBACK stamps ----
+        if (HasMetaRow)
+        {
+            int metaX = left;
+            int badgeH = P(18);
+            int metaY = nextY;
+
+            if (!string.IsNullOrEmpty(_slotText))
+            {
+                string keyLabel = $"[ {_slotText.ToUpperInvariant()} ]";
+                var measured = TextRenderer.MeasureText(g, keyLabel, Theme.MonoSmallBold);
+                int kw = Math.Min(Width - left - P(12), measured.Width + P(10));
+                var keyRect = new Rectangle(metaX, metaY, kw, badgeH);
+                Gfx.FillAndStrokeRect(
+                    g,
+                    keyRect,
+                    1,
+                    _hover ? Theme.BrushSheet : Theme.BrushPaper,
+                    _isActive ? Theme.PenInk : Theme.PenRule);
+                TextRenderer.DrawText(g, keyLabel, Theme.MonoSmallBold, keyRect,
+                    _isActive ? Theme.Ink : Theme.Graphite,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                metaX = keyRect.Right + P(6);
+            }
+
+            if (Card.AutoActivate)
+            {
+                int autoW = P(46);
+                var autoRect = new Rectangle(metaX, metaY, autoW, badgeH);
+                if (autoRect.Right <= Width - P(10))
+                {
+                    Gfx.FillAndStrokeRect(g, autoRect, 1, _hover ? Theme.BrushSheet : Theme.BrushPaper, Theme.PenRule);
+                    int sq = Math.Max(4, P(4));
+                    g.FillRectangle(Theme.BrushVermilion, autoRect.X + P(5), autoRect.Y + (autoRect.Height - sq) / 2, sq, sq);
+                    var txtR = new Rectangle(autoRect.X + P(10), autoRect.Y, autoRect.Width - P(11), autoRect.Height);
+                    TextRenderer.DrawText(g, "AUTO", Theme.MonoSmallBold, txtR, Theme.Graphite,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                    metaX = autoRect.Right + P(6);
+                }
+            }
+
+            if (_isFallback)
+            {
+                int fbW = P(64);
+                var fbRect = new Rectangle(metaX, metaY, fbW, badgeH);
+                if (fbRect.Right <= Width - P(10))
+                {
+                    Gfx.FillAndStrokeRect(g, fbRect, 1, _hover ? Theme.BrushSheet : Theme.BrushPaper, Theme.PenRule);
+                    TextRenderer.DrawText(g, "FALLBACK", Theme.MonoSmallBold, fbRect, Theme.Graphite,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                }
+            }
+        }
+
+        // ---- Top-Right Stamp / Hover Controls ----
         if (showButtons)
         {
             DrawEditButton(g, EditRect());
@@ -1714,82 +1790,69 @@ internal sealed class CardControl : Control
         }
         else if (_isActive)
         {
-            var pill = new Rectangle(Width - P(12) - P(60), P(12), P(60), P(20));
-            using var pp = Gfx.RoundRect(pill, P(10));
-            using (var fill = new SolidBrush(Theme.AccentSoft)) g.FillPath(fill, pp);
-            using (var pen = new Pen(Color.FromArgb(115, Theme.Accent), 1f)) g.DrawPath(pen, pp);
-            TextRenderer.DrawText(g, "● ACTIVE", Theme.MicroBold, pill, Theme.AccentEnd,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-        }
-        else if (_isFallback)
-        {
-            var pill = new Rectangle(Width - P(12) - P(34), P(12), P(34), P(20));
-            using var pp = Gfx.RoundRect(pill, P(10));
-            using (var fill = new SolidBrush(Theme.BgElevated)) g.FillPath(fill, pp);
-            using (var pen = new Pen(Theme.BgBorderStrong, 1f)) g.DrawPath(pen, pp);
-            TextRenderer.DrawText(g, "FB", Theme.MicroBold, pill, Theme.TextSoft,
+            var stamp = new Rectangle(Width - P(10) - P(60), P(10), P(60), P(19));
+            Gfx.FillAndStrokeRect(g, stamp, 1, Theme.BrushPaper, Theme.PenFountainGreen);
+            int sq = Math.Max(4, P(4));
+            g.FillRectangle(Theme.BrushFountainGreen, stamp.X + P(5), stamp.Y + (stamp.Height - sq) / 2, sq, sq);
+            var textR = new Rectangle(stamp.X + P(10), stamp.Y, stamp.Width - P(11), stamp.Height);
+            TextRenderer.DrawText(g, "ACTIVE", Theme.MonoSmallBold, textR, Theme.FountainGreen,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
     }
 
     private void DrawDeviceRow(Graphics g, string tag, string? name, int? volume, bool missing, int left, int y)
     {
-        int pillW = P(38);
-        int pillH = P(16);
-        var tagRect = new Rectangle(left, y + P(1), pillW, pillH);
-        using (var tp = Gfx.RoundRect(tagRect, P(4)))
-        {
-            using var tb = new SolidBrush(Theme.BgSurface);
-            g.FillPath(tb, tp);
-            using var tpen = new Pen(Color.FromArgb(30, 255, 255, 255), 1f);
-            g.DrawPath(tpen, tp);
-        }
-        TextRenderer.DrawText(g, tag, Theme.MicroBold, tagRect, Theme.TextMuted,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        int tagW = P(34);
+        int rowH = P(18);
+        var tagRect = new Rectangle(left, y, tagW, rowH);
+        TextRenderer.DrawText(g, tag, Theme.MonoSmallBold, tagRect, Theme.Graphite,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
-        int rightLimit = Width - P(12);
+        int rightLimit = Width - P(10);
         if (volume.HasValue)
         {
-            int volW = P(36);
-            var volRect = new Rectangle(rightLimit - volW, y + P(1), volW, pillH);
-            using var vp = Gfx.RoundRect(volRect, P(8));
-            using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
-            TextRenderer.DrawText(g, $"{volume.Value}%", Theme.MicroBold, volRect, Theme.AccentEnd,
+            int volW = P(34);
+            var volRect = new Rectangle(rightLimit - volW, y + P(1), volW, P(16));
+            Gfx.FillAndStrokeRect(g, volRect, 1, _hover ? Theme.BrushSheet : Theme.BrushPaper, Theme.PenRule);
+            TextRenderer.DrawText(g, $"{volume.Value}%", Theme.MonoSmallBold, volRect, Theme.Ink,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             rightLimit = volRect.X - P(6);
         }
 
         string text = name ?? "Not changed";
-        if (missing) text += "  (offline)";
-        var color = missing ? Theme.Warning : (name == null && !volume.HasValue ? Theme.TextMuted : Theme.TextSoft);
+        if (missing) text += " (offline)";
+        var color = missing ? Theme.Vermilion : Theme.Graphite;
 
-        int x = left + pillW + P(8);
+        int x = left + tagW + P(4);
         TextRenderer.DrawText(g, text, Theme.Small,
-            new Rectangle(x, y, Math.Max(P(20), rightLimit - x), P(18)), color, TextFlags);
+            new Rectangle(x, y, Math.Max(P(20), rightLimit - x), rowH), color, TextFlags);
     }
 
     private void DrawEditButton(Graphics g, Rectangle rect)
     {
-        using var p = Gfx.RoundRect(rect, P(6));
-        using (var b = new SolidBrush(_hoverEdit ? Theme.BgBorderStrong : Theme.BgSurface))
-            g.FillPath(b, p);
-        using (var pen = new Pen(_hoverEdit ? Theme.BgBorderStrong : Theme.BgBorder, 1f))
-            g.DrawPath(pen, p);
-        TextRenderer.DrawText(g, "Edit", Theme.Small, rect, _hoverEdit ? Theme.TextPrimary : Theme.TextSoft,
+        Gfx.FillAndStrokeRect(
+            g,
+            rect,
+            1,
+            _hoverEdit ? Theme.BrushInk : Theme.BrushSheet,
+            Theme.PenInk);
+        TextRenderer.DrawText(g, "EDIT", Theme.MonoSmallBold, rect, _hoverEdit ? Theme.Paper : Theme.Ink,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }
 
     private void DrawDeleteButton(Graphics g, Rectangle rect)
     {
-        using var p = Gfx.RoundRect(rect, P(6));
-        using (var b = new SolidBrush(_confirmDelete ? Theme.Danger : (_hoverDel ? Theme.DangerSoft : Theme.BgSurface)))
-            g.FillPath(b, p);
-        using (var pen = new Pen(_confirmDelete || _hoverDel ? Theme.Danger : Theme.BgBorder, 1f))
-            g.DrawPath(pen, p);
+        bool vermilionSolid = _confirmDelete || _hoverDel;
+        Gfx.FillAndStrokeRect(
+            g,
+            rect,
+            1,
+            vermilionSolid ? Theme.BrushVermilion : Theme.BrushSheet,
+            vermilionSolid ? Theme.PenVermilion : Theme.PenInk);
 
-        string text = _confirmDelete ? "Delete?" : "×";
-        var color = _confirmDelete ? Color.White : (_hoverDel ? Theme.Danger : Theme.TextMuted);
-        TextRenderer.DrawText(g, text, _confirmDelete ? Theme.SmallBold : Theme.Title, rect, color,
+        string text = _confirmDelete ? "DELETE?" : "×";
+        var color = vermilionSolid ? Theme.Paper : Theme.Ink;
+        TextRenderer.DrawText(g, text, _confirmDelete ? Theme.MonoSmallBold : Theme.BodyBold, rect, color,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }
 
@@ -1804,7 +1867,7 @@ internal sealed class CardControl : Control
     }
 }
 
-/// <summary>Always-on-top, never-activating PerMonitorV2-aware rounded overlay window.</summary>
+/// <summary>Always-on-top, never-activating PerMonitorV2-aware crisp printed-slip overlay window.</summary>
 internal abstract class OverlayForm : Form
 {
     private readonly List<Font> _ownedFonts = new();
@@ -1835,10 +1898,10 @@ internal abstract class OverlayForm : Form
 
     protected int Px(int logicalPx) => (int)Math.Round(logicalPx * Dpi);
 
-    protected Font CreateDpiFont(float ptAt96Dpi, FontStyle style)
+    protected Font CreateDpiFont(string family, float ptAt96Dpi, FontStyle style)
     {
         float pxSize = Math.Max(8f, ptAt96Dpi * (96f / 72f) * Dpi);
-        var f = new Font("Segoe UI", pxSize, style, GraphicsUnit.Pixel);
+        var f = new Font(family, pxSize, style, GraphicsUnit.Pixel);
         _ownedFonts.Add(f);
         return f;
     }
@@ -1872,7 +1935,8 @@ internal abstract class OverlayForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        Native.RoundCornersSmall(Handle);
+        Native.CrispCorners(Handle);
+        Native.SetBorderColor(Handle, Theme.StrongBorder);
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -1891,7 +1955,6 @@ internal abstract class OverlayForm : Form
             var cp = base.CreateParams;
             cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; // NOACTIVATE | TOOLWINDOW | TOPMOST
             if (_clickThrough) cp.ExStyle |= 0x00000020; // WS_EX_TRANSPARENT
-            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
             return cp;
         }
     }
@@ -1903,27 +1966,30 @@ internal abstract class OverlayForm : Form
     }
 }
 
-/// <summary>Modern rounded floating toast with smooth opacity fade-in / fade-out.</summary>
+/// <summary>
+/// Compact Editorial E-Ink printed-slip OSD toast: #F7F5F0 paper background, 1px solid #1A1A18 border,
+/// 5×5px #C83E2B square accent, Georgia serif profile heading, and monospace output/input summary.
+/// </summary>
 internal sealed class OsdBannerForm : OverlayForm
 {
-    private const double TargetOpacity = 0.96;
+    private const double TargetOpacity = 0.98;
 
-    private readonly System.Windows.Forms.Timer _holdTimer = new() { Interval = 1600 };
+    private readonly System.Windows.Forms.Timer _holdTimer = new() { Interval = 1700 };
     private readonly System.Windows.Forms.Timer _fadeTimer = new() { Interval = 16 };
-    private readonly Label _catLbl = new() { BackColor = Color.Transparent };
-    private readonly Label _msgLbl = new() { AutoEllipsis = true, BackColor = Color.Transparent };
-    private Color _accent = Theme.Accent;
+    private Font _catFont = Theme.MonoSmallBold;
+    private Font _titleFont = Theme.CardTitle;
+    private Font _subFont = Theme.MonoSmall;
+    private string _category = "";
+    private string _title = "";
+    private string? _subtitle;
+    private Color _accent = Theme.Vermilion;
     private Rectangle? _targetArea;
     private bool _fadingOut;
 
     public OsdBannerForm()
     {
-        BackColor = Theme.BgCard;
+        BackColor = Theme.Paper;
         Opacity = 0;
-
-        _catLbl.ForeColor = Theme.TextMuted;
-        _msgLbl.ForeColor = Theme.TextPrimary;
-        Controls.AddRange(new Control[] { _catLbl, _msgLbl });
 
         ApplyDpiLayout();
 
@@ -1938,13 +2004,13 @@ internal sealed class OsdBannerForm : OverlayForm
         {
             if (!_fadingOut)
             {
-                double next = Math.Min(TargetOpacity, Opacity + 0.14);
+                double next = Math.Min(TargetOpacity, Opacity + 0.16);
                 Opacity = next;
                 if (next >= TargetOpacity - 0.005) _fadeTimer.Stop();
             }
             else
             {
-                double next = Math.Max(0.0, Opacity - 0.11);
+                double next = Math.Max(0.0, Opacity - 0.12);
                 Opacity = next;
                 if (next <= 0.005)
                 {
@@ -1957,22 +2023,13 @@ internal sealed class OsdBannerForm : OverlayForm
 
     protected override void ApplyDpiLayout()
     {
-        var catFont = new Font("Segoe UI", Math.Max(8f, 7.5f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
-        var msgFont = new Font("Segoe UI", Math.Max(10f, 10f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
-
-        _catLbl.Font = catFont;
-        _msgLbl.Font = msgFont;
         ClearOwnedFonts();
-        _catLbl.Font = CreateDpiFont(7.5f, FontStyle.Bold);
-        _msgLbl.Font = CreateDpiFont(10f, FontStyle.Bold);
-        catFont.Dispose();
-        msgFont.Dispose();
+        _catFont = CreateDpiFont(Theme.MonospaceFontName, 7.5f, FontStyle.Bold);
+        _titleFont = CreateDpiFont("Georgia", 10.5f, FontStyle.Bold);
+        _subFont = CreateDpiFont(Theme.MonospaceFontName, 7.5f, FontStyle.Regular);
 
-        Size = new Size(Px(356), Px(64));
-        _catLbl.Location = new Point(Px(20), Px(11));
-        _catLbl.Size = new Size(Px(320), Px(16));
-        _msgLbl.Location = new Point(Px(20), Px(29));
-        _msgLbl.Size = new Size(Px(320), Px(24));
+        int height = string.IsNullOrWhiteSpace(_subtitle) ? Px(62) : Px(78);
+        Size = new Size(Px(352), height);
 
         if (_targetArea is { } area)
         {
@@ -1983,26 +2040,37 @@ internal sealed class OsdBannerForm : OverlayForm
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        Theme.ConfigureGraphics(g);
 
-        using (var bg = new LinearGradientBrush(r, Theme.BgCardTop, Theme.BgSurface, 90f))
-            g.FillRectangle(bg, r);
+        g.FillRectangle(Theme.BrushPaper, 0, 0, Width, Height);
+        g.DrawRectangle(Theme.PenInk, 0, 0, Width - 1, Height - 1);
 
-        // Ambient glow strip along left edge
-        using (var glow = new LinearGradientBrush(new Rectangle(0, 0, Px(80), Height), Color.FromArgb(40, _accent), Color.FromArgb(0, _accent), 0f))
-            g.FillRectangle(glow, 0, 0, Px(80), Height);
+        int padX = Px(14);
+        int sq = Math.Max(5, Px(5));
+        int catY = Px(10);
 
-        var pillBar = new Rectangle(Px(7), Px(12), Math.Max(3, Px(4)), Height - Px(24));
-        using (var bp = Gfx.RoundRect(pillBar, 2))
-        using (var bb = new SolidBrush(_accent))
-            g.FillPath(bb, bp);
+        // 5×5px Stamp Vermilion (or status accent) editorial square
+        using (var sqBrush = new SolidBrush(_accent))
+            g.FillRectangle(sqBrush, padX, catY + Px(5), sq, sq);
 
-        using (var border = new Pen(Theme.BgBorderStrong, 1f))
-            g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        var catRect = new Rectangle(padX + sq + Px(7), catY, Width - padX * 2 - sq - Px(7), Px(15));
+        TextRenderer.DrawText(g, _category.ToUpperInvariant(), _catFont, catRect, Theme.Graphite,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+
+        var titleRect = new Rectangle(padX, Px(28), Width - padX * 2, Px(22));
+        TextRenderer.DrawText(g, _title, _titleFont, titleRect, Theme.Ink,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+
+        if (!string.IsNullOrWhiteSpace(_subtitle))
+        {
+            g.DrawLine(Theme.PenRule, padX, Px(54), Width - padX, Px(54));
+            var subRect = new Rectangle(padX, Px(57), Width - padX * 2, Px(15));
+            TextRenderer.DrawText(g, _subtitle, _subFont, subRect, Theme.Graphite,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        }
     }
 
-    public void ShowMessage(string category, string message, Color accentColor)
+    public void ShowMessage(string category, string message, Color accentColor, string? summary = null)
     {
         Screen? activeScreen = null;
         try { activeScreen = Screen.FromPoint(Cursor.Position); } catch { }
@@ -2010,12 +2078,13 @@ internal sealed class OsdBannerForm : OverlayForm
         if (area == null) return;
 
         _accent = accentColor;
-        _catLbl.Text = category;
-        _msgLbl.Text = message;
+        _category = category;
+        _title = message;
+        _subtitle = summary;
         _targetArea = area.Value;
 
-        Location = new Point(area.Value.Left + (area.Value.Width - Width) / 2, area.Value.Bottom - Height - Px(38));
         ApplyDpiLayout();
+        Location = new Point(area.Value.Left + (area.Value.Width - Width) / 2, area.Value.Bottom - Height - Px(38));
         Invalidate();
 
         _fadingOut = false;
@@ -2040,10 +2109,10 @@ internal sealed class OsdBannerForm : OverlayForm
     }
 }
 
-/// <summary>Modern crimson floating MIC MUTED pill with optional drag-to-move and click-to-unmute.</summary>
+/// <summary>Compact Editorial E-Ink MIC MUTED printed stamp slip with optional drag-to-move and click-to-unmute.</summary>
 internal sealed class MuteBannerForm : OverlayForm
 {
-    private readonly Label _label;
+    private Font _labelFont = Theme.MonoBold;
     private MuteBannerPosition _position = MuteBannerPosition.TopCenter;
     private int? _customX;
     private int? _customY;
@@ -2059,24 +2128,15 @@ internal sealed class MuteBannerForm : OverlayForm
 
     public MuteBannerForm()
     {
-        BackColor = Color.FromArgb(36, 16, 22);
-        Opacity = 0.94;
+        BackColor = Theme.Paper;
+        Opacity = 0.98;
 
-        _label = new Label
-        {
-            Text = "●  MIC MUTED",
-            ForeColor = Color.FromArgb(255, 112, 128),
-            BackColor = Color.Transparent,
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleCenter
-        };
-        _label.MouseEnter += (_, _) => { if (Interactive) { _hover = true; Invalidate(); } };
-        _label.MouseLeave += (_, _) => { if (_hover) { _hover = false; Invalidate(); } };
-        _label.MouseDown += OnInteractiveMouseDown;
-        _label.MouseMove += OnInteractiveMouseMove;
-        _label.MouseUp += OnInteractiveMouseUp;
+        MouseEnter += (_, _) => { if (Interactive) { _hover = true; Invalidate(); } };
+        MouseLeave += (_, _) => { if (_hover) { _hover = false; Invalidate(); } };
+        MouseDown += OnInteractiveMouseDown;
+        MouseMove += OnInteractiveMouseMove;
+        MouseUp += OnInteractiveMouseUp;
 
-        Controls.Add(_label);
         ApplyDpiLayout();
     }
 
@@ -2086,7 +2146,7 @@ internal sealed class MuteBannerForm : OverlayForm
         set
         {
             ClickThrough = !value;
-            _label.Cursor = value ? Cursors.Hand : Cursors.Default;
+            Cursor = value ? Cursors.Hand : Cursors.Default;
             Invalidate();
         }
     }
@@ -2098,7 +2158,7 @@ internal sealed class MuteBannerForm : OverlayForm
         _dragged = false;
         _dragStartScreen = Cursor.Position;
         _formStartLocation = Location;
-        _label.Capture = true;
+        Capture = true;
     }
 
     private void OnInteractiveMouseMove(object? sender, MouseEventArgs e)
@@ -2111,7 +2171,7 @@ internal sealed class MuteBannerForm : OverlayForm
         if (!_dragged && (Math.Abs(dx) > 4 || Math.Abs(dy) > 4))
         {
             _dragged = true;
-            _label.Cursor = Cursors.SizeAll;
+            Cursor = Cursors.SizeAll;
         }
 
         if (_dragged)
@@ -2134,8 +2194,8 @@ internal sealed class MuteBannerForm : OverlayForm
     {
         if (!_mouseDown || e.Button != MouseButtons.Left) return;
         _mouseDown = false;
-        _label.Capture = false;
-        _label.Cursor = Interactive ? Cursors.Hand : Cursors.Default;
+        Capture = false;
+        Cursor = Interactive ? Cursors.Hand : Cursors.Default;
 
         if (_dragged)
         {
@@ -2152,13 +2212,10 @@ internal sealed class MuteBannerForm : OverlayForm
 
     protected override void ApplyDpiLayout()
     {
-        var tempFont = new Font("Segoe UI", Math.Max(9f, 8.5f * (96f / 72f) * Dpi), FontStyle.Bold, GraphicsUnit.Pixel);
-        _label.Font = tempFont;
         ClearOwnedFonts();
-        _label.Font = CreateDpiFont(8.5f, FontStyle.Bold);
-        tempFont.Dispose();
+        _labelFont = CreateDpiFont(Theme.MonospaceFontName, 8.25f, FontStyle.Bold);
 
-        Size = new Size(Px(136), Px(32));
+        Size = new Size(Px(124), Px(30));
         if (_targetArea is { } area && !_dragged)
         {
             Location = ProfileLogic.ComputeMuteBannerLocation(area, Size, _position, Dpi, _customX, _customY);
@@ -2168,26 +2225,20 @@ internal sealed class MuteBannerForm : OverlayForm
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        Theme.ConfigureGraphics(g);
 
-        using (var bg = new LinearGradientBrush(r, Color.FromArgb(46, 18, 26), Color.FromArgb(28, 12, 18), 90f))
-            g.FillRectangle(bg, r);
+        g.FillRectangle(Interactive && _hover ? Theme.BrushPressedPaper : Theme.BrushPaper, 0, 0, Width, Height);
+        g.FillRectangle(Theme.BrushVermilion, 1, 1, Math.Max(3, Px(3)), Height - 2);
+        g.DrawRectangle(Theme.PenInk, 0, 0, Width - 1, Height - 1);
 
-        if (Interactive)
-        {
-            // Subtle grip dots on right edge when draggable
-            using var dot = new SolidBrush(Color.FromArgb(120, 255, 130, 145));
-            int gx = Width - Px(11);
-            int gy = Height / 2 - Px(4);
-            int d = Math.Max(2, Px(2));
-            g.FillEllipse(dot, gx, gy, d, d);
-            g.FillEllipse(dot, gx, gy + Px(5), d, d);
-        }
+        int sq = Math.Max(5, Px(5));
+        int sqX = Px(13);
+        int sqY = (Height - sq) / 2;
+        g.FillRectangle(Theme.BrushVermilion, sqX, sqY, sq, sq);
 
-        var borderColor = Interactive && _hover ? Color.FromArgb(255, 132, 148) : Theme.Danger;
-        using var border = new Pen(borderColor, 1.2f);
-        g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        var textRect = new Rectangle(sqX + sq + Px(6), 0, Width - (sqX + sq + Px(12)), Height);
+        TextRenderer.DrawText(g, "MIC MUTED", _labelFont, textRect, Theme.Vermilion,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
     }
 
     public void ShowBanner(MuteBannerPosition position = MuteBannerPosition.TopCenter, int? customX = null, int? customY = null)
@@ -2216,24 +2267,24 @@ internal sealed class MuteBannerForm : OverlayForm
     }
 }
 
-/// <summary>Rounded dark-obsidian progress bar with indigo→violet gradient fill and smooth indeterminate pulse.</summary>
+/// <summary>Crisp flat Editorial E-Ink progress bar (zero gradients, solid ink fill).</summary>
 internal sealed class DarkProgressBar : Control
 {
-    private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 25 };
+    private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 28 };
     private int _value;
     private bool _indeterminate;
-    private float _pulsePos = -0.35f;
+    private float _pulsePos = -0.30f;
 
     public DarkProgressBar()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        Size = new Size(340, 10);
-        BackColor = Theme.BgMain;
+        Size = new Size(340, 8);
+        BackColor = Theme.Paper;
         _animTimer.Tick += (_, _) =>
         {
             _pulsePos += 0.035f;
-            if (_pulsePos > 1.05f) _pulsePos = -0.35f;
+            if (_pulsePos > 1.05f) _pulsePos = -0.30f;
             Invalidate();
         };
     }
@@ -2261,7 +2312,7 @@ internal sealed class DarkProgressBar : Control
             _indeterminate = value;
             if (_indeterminate)
             {
-                _pulsePos = -0.35f;
+                _pulsePos = -0.30f;
                 _animTimer.Start();
             }
             else
@@ -2275,37 +2326,30 @@ internal sealed class DarkProgressBar : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+        Theme.ConfigureGraphics(g);
+        g.Clear(Parent?.BackColor ?? Theme.Paper);
 
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         if (r.Width <= 2 || r.Height <= 2) return;
-        int rad = Math.Max(2, r.Height / 2);
 
-        using var trackPath = Gfx.RoundRect(r, rad);
-        using (var trackBrush = new SolidBrush(Theme.BgElevated)) g.FillPath(trackBrush, trackPath);
+        g.FillRectangle(Theme.BrushSheet, r);
 
-        g.SetClip(trackPath);
+        var inner = new Rectangle(1, 1, Math.Max(1, r.Width - 1), Math.Max(1, r.Height - 1));
+        g.SetClip(inner);
         if (_indeterminate)
         {
-            int segW = Math.Max(24, (int)(r.Width * 0.32f));
-            int segX = (int)(_pulsePos * r.Width);
-            var segRect = new Rectangle(segX, r.Y, segW, r.Height);
-            if (segRect.Width > 0)
-            {
-                Gfx.FillGradientRoundRect(g, segRect, rad, Theme.Accent, Theme.AccentEnd, 0f);
-            }
+            int segW = Math.Max(22, (int)(inner.Width * 0.28f));
+            int segX = inner.X + (int)(_pulsePos * inner.Width);
+            g.FillRectangle(Theme.BrushInk, segX, inner.Y, segW, inner.Height);
         }
         else if (_value > 0)
         {
-            int fillW = Math.Max(r.Height, (int)Math.Round(r.Width * (_value / 100.0)));
-            var fillRect = new Rectangle(r.X, r.Y, Math.Min(r.Width, fillW), r.Height);
-            Gfx.FillGradientRoundRect(g, fillRect, rad, Theme.Accent, Theme.AccentEnd, 0f);
+            int fillW = (int)Math.Round(inner.Width * (_value / 100.0));
+            if (fillW > 0) g.FillRectangle(Theme.BrushInk, inner.X, inner.Y, fillW, inner.Height);
         }
         g.ResetClip();
 
-        using var border = new Pen(Theme.BgBorder, 1f);
-        g.DrawPath(border, trackPath);
+        g.DrawRectangle(Theme.PenInk, r);
     }
 
     protected override void Dispose(bool disposing)
