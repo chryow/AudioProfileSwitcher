@@ -26,6 +26,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _debounceTimer = new() { Interval = 2000 };
     private readonly System.Windows.Forms.Timer _recoveryTimer = new() { Interval = 1000 };
     private readonly bool _startMinimized;
+    private readonly string? _updatedToVersion;
 
     private readonly Panel _titleBar;
     private readonly FlowLayoutPanel _cardsPanel;
@@ -59,6 +60,10 @@ public sealed class MainForm : Form
     private bool _updatingVoiceControls;
     private bool _voiceListening;
     private string _voiceStatusText = "Disabled";
+    private ReleaseCheckResult? _availableUpdate;
+    private Rectangle _updatePillRect = Rectangle.Empty;
+    private bool _updatePillHover;
+    private bool _checkingUpdates;
     private bool _resizingHeight;
     private int _resizeStartScreenY;
     private int _resizeStartHeight;
@@ -89,9 +94,10 @@ public sealed class MainForm : Form
         }
     }
 
-    public MainForm(bool startMinimized = false)
+    public MainForm(bool startMinimized = false, string? updatedToVersion = null)
     {
         _startMinimized = startMinimized;
+        _updatedToVersion = updatedToVersion;
         _config = _store.Load();
         _hotKeys = new HotKeyService();
         _refreshCoalescer = new SingleFlightCoalescer(ExecuteRefreshPassAsync);
@@ -111,7 +117,7 @@ public sealed class MainForm : Form
         Padding = new Padding(1);
         DoubleBuffered = true;
 
-        // ---- modern title bar with vector emblem + version & voice pills ----
+        // ---- modern title bar with vector emblem + version / update & voice pills ----
         var titleBar = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Theme.BgMain };
         _titleBar = titleBar;
         titleBar.Paint += (_, e) =>
@@ -130,25 +136,76 @@ public sealed class MainForm : Form
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
             var measured = TextRenderer.MeasureText(g, "AudioSwitcher", Theme.Title);
-            var verRect = new Rectangle(titleX + measured.Width + P(2), (titleBar.Height - P(18)) / 2, P(44), P(18));
-            using var vp = Gfx.RoundRect(verRect, P(9));
-            using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
-            TextRenderer.DrawText(g, $"v{AppInfo.Version}", Theme.MicroBold, verRect, Theme.AccentEnd,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            int pillX = titleX + measured.Width + P(2);
+            int pillY = (titleBar.Height - P(18)) / 2;
+            Rectangle badgeRect;
+
+            if (_availableUpdate is { UpdateAvailable: true } upd)
+            {
+                string updLabel = $"↑ {upd.LatestVersion}";
+                int badgeW = Math.Clamp(TextRenderer.MeasureText(g, updLabel, Theme.MicroBold).Width + P(10), P(52), P(74));
+                badgeRect = new Rectangle(pillX, pillY, badgeW, P(18));
+                _updatePillRect = badgeRect;
+
+                using var up = Gfx.RoundRect(badgeRect, P(9));
+                using (var ub = new SolidBrush(_updatePillHover ? Color.FromArgb(62, Theme.Success) : Theme.SuccessSoft))
+                    g.FillPath(ub, up);
+                using (var upen = new Pen(Color.FromArgb(_updatePillHover ? 220 : 140, Theme.Success), 1f))
+                    g.DrawPath(upen, up);
+                TextRenderer.DrawText(g, updLabel, Theme.MicroBold, badgeRect, Theme.Success,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+            else
+            {
+                _updatePillRect = Rectangle.Empty;
+                badgeRect = new Rectangle(pillX, pillY, P(44), P(18));
+                using var vp = Gfx.RoundRect(badgeRect, P(9));
+                using (var vb = new SolidBrush(Theme.AccentSoft)) g.FillPath(vb, vp);
+                TextRenderer.DrawText(g, $"v{AppInfo.Version}", Theme.MicroBold, badgeRect, Theme.AccentEnd,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
 
             if (_voiceListening)
             {
-                var voiceRect = new Rectangle(verRect.Right + P(5), (titleBar.Height - P(18)) / 2, P(48), P(18));
-                using var vcp = Gfx.RoundRect(voiceRect, P(9));
-                using (var vcb = new SolidBrush(Theme.SuccessSoft)) g.FillPath(vcb, vcp);
-                using (var vcpen = new Pen(Color.FromArgb(110, Theme.Success), 1f)) g.DrawPath(vcpen, vcp);
-                TextRenderer.DrawText(g, "● VOICE", Theme.MicroBold, voiceRect, Theme.Success,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                var voiceRect = new Rectangle(badgeRect.Right + P(5), pillY, P(48), P(18));
+                int rightLimit = (_gearBtn?.Left ?? (titleBar.Width - P(112))) - P(4);
+                if (voiceRect.Right < rightLimit)
+                {
+                    using var vcp = Gfx.RoundRect(voiceRect, P(9));
+                    using (var vcb = new SolidBrush(Theme.SuccessSoft)) g.FillPath(vcb, vcp);
+                    using (var vcpen = new Pen(Color.FromArgb(110, Theme.Success), 1f)) g.DrawPath(vcpen, vcp);
+                    TextRenderer.DrawText(g, "● VOICE", Theme.MicroBold, voiceRect, Theme.Success,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                }
+            }
+        };
+        titleBar.MouseMove += (_, e) =>
+        {
+            bool hit = !_updatePillRect.IsEmpty && _updatePillRect.Contains(e.Location);
+            if (hit != _updatePillHover)
+            {
+                _updatePillHover = hit;
+                titleBar.Cursor = hit ? Cursors.Hand : Cursors.Default;
+                titleBar.Invalidate();
+            }
+        };
+        titleBar.MouseLeave += (_, _) =>
+        {
+            if (_updatePillHover)
+            {
+                _updatePillHover = false;
+                titleBar.Cursor = Cursors.Default;
+                titleBar.Invalidate();
             }
         };
         titleBar.MouseDown += (_, e) =>
         {
             if (e.Button != MouseButtons.Left) return;
+            if (!_updatePillRect.IsEmpty && _updatePillRect.Contains(e.Location))
+            {
+                ShowUpdateDialog();
+                return;
+            }
             Native.DragWindow(Handle);
             CaptureWindowBounds(persist: true);
         };
@@ -380,6 +437,8 @@ public sealed class MainForm : Form
         SyncVoiceControl();
 
         if (_store.LoadWarning != null) SetStatus(_store.LoadWarning, true);
+        if (!string.IsNullOrEmpty(_updatedToVersion)) _ = ShowUpdatedConfirmationAsync(_updatedToVersion);
+        if (_config.AutoCheckUpdates) _ = CheckForUpdatesSilentlyAsync();
     }
 
     // =========================================================================================
@@ -892,6 +951,14 @@ public sealed class MainForm : Form
         sysGrid.Controls.Add(MakeRowLabel("Start with Windows (minimized to tray)", 32));
         sysGrid.Controls.Add(NewToggle(IsStartupEnabled(), SetStartupSafe));
 
+        sysGrid.Controls.Add(MakeRowLabel("Check for updates automatically on startup", 32));
+        sysGrid.Controls.Add(NewToggle(_config.AutoCheckUpdates, on =>
+        {
+            _config.AutoCheckUpdates = on;
+            Save();
+            if (on && _availableUpdate == null) _ = CheckForUpdatesSilentlyAsync(delayMs: 250);
+        }));
+
         var filterBtn = MakeActionButton("Choose devices for cycling…", (_, _) => _ = OpenDeviceFilterDialogAsync());
         filterBtn.Margin = new Padding(0, 6, 0, 0);
         sysGrid.Controls.Add(filterBtn);
@@ -909,20 +976,26 @@ public sealed class MainForm : Form
         sysGrid.Controls.Add(dataRow);
         sysGrid.SetColumnSpan(dataRow, 2);
 
-        _checkUpdateBtn = MakeActionButton($"Check for Updates  (v{AppInfo.Version})", (_, _) => _ = CheckForUpdatesAsync());
+        _checkUpdateBtn = MakeActionButton($"Check for Updates  (v{AppInfo.Version})", (_, _) =>
+        {
+            if (_availableUpdate is { UpdateAvailable: true })
+                ShowUpdateDialog();
+            else
+                _ = CheckForUpdatesAsync();
+        });
         _checkUpdateBtn.Margin = new Padding(0, 6, 0, 0);
         sysGrid.Controls.Add(_checkUpdateBtn);
         sysGrid.SetColumnSpan(_checkUpdateBtn, 2);
 
         var pathLbl = new Label
         {
-            Text = $"Settings: {_store.FilePath}\nLog: {AppLog.FilePath}",
+            Text = $"Build: v{AppInfo.Version} ({AppInfo.BuildFlavorLabel})\nSettings: {_store.FilePath}\nLog: {AppLog.FilePath}",
             Font = Theme.Small,
             ForeColor = Theme.TextMuted,
             BackColor = Theme.BgSurface,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            Height = 46,
+            Height = 60,
             Margin = new Padding(0, 8, 0, 0)
         };
         sysGrid.Controls.Add(pathLbl);
@@ -1056,8 +1129,49 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task ShowUpdatedConfirmationAsync(string version)
+    {
+        try
+        {
+            await Task.Delay(350);
+            if (IsDisposed) return;
+            ShowFeedback("UPDATED", $"Now running {version}", Theme.Success, playSwitchChime: false);
+            AppLog.Info($"Post-update startup confirmed on {version}.");
+        }
+        catch { }
+    }
+
+    private async Task CheckForUpdatesSilentlyAsync(int delayMs = 4000)
+    {
+        try
+        {
+            await Task.Delay(delayMs);
+            if (IsDisposed || _checkingUpdates || _availableUpdate is { UpdateAvailable: true }) return;
+
+            _checkingUpdates = true;
+            var res = await UpdateService.CheckForUpdatesAsync();
+            if (IsDisposed) return;
+
+            if (res.UpdateAvailable)
+            {
+                ApplyAvailableUpdateState(res);
+                AppLog.Info($"Background update check found {res.LatestVersion} (verified asset: {res.HasVerifiedDownload}).");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info("Silent startup update check skipped: " + ex.Message);
+        }
+        finally
+        {
+            _checkingUpdates = false;
+        }
+    }
+
     private async Task CheckForUpdatesAsync()
     {
+        if (_checkingUpdates) return;
+        _checkingUpdates = true;
         _checkUpdateBtn.Enabled = false;
         _checkUpdateBtn.Text = "Checking GitHub Releases…";
         try
@@ -1067,23 +1181,15 @@ public sealed class MainForm : Form
 
             if (!res.UpdateAvailable)
             {
+                _availableUpdate = null;
+                _titleBar.Invalidate();
                 SetStatus($"You're on the latest version (v{AppInfo.Version})", false);
                 return;
             }
 
+            ApplyAvailableUpdateState(res);
             SetStatus($"Update available: {res.LatestVersion}", false);
-            var answer = MessageBox.Show(
-                this,
-                $"A newer release ({res.LatestVersion}) is available on GitHub.\n\nOpen the release download page in your browser?",
-                "Update Available",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Information);
-
-            if (answer == DialogResult.Yes)
-            {
-                string safeUrl = ProfileLogic.SanitizeReleaseUrl(res.ReleaseUrl);
-                Process.Start(new ProcessStartInfo { FileName = safeUrl, UseShellExecute = true });
-            }
+            ShowUpdateDialog();
         }
         catch (Exception ex)
         {
@@ -1092,11 +1198,49 @@ public sealed class MainForm : Form
         }
         finally
         {
+            _checkingUpdates = false;
             if (!IsDisposed)
             {
                 _checkUpdateBtn.Enabled = true;
-                _checkUpdateBtn.Text = $"Check for Updates  (v{AppInfo.Version})";
+                RefreshUpdateButton();
             }
+        }
+    }
+
+    private void ApplyAvailableUpdateState(ReleaseCheckResult release)
+    {
+        _availableUpdate = release;
+        RefreshUpdateButton();
+        _titleBar.Invalidate();
+    }
+
+    private void RefreshUpdateButton()
+    {
+        if (_availableUpdate is { UpdateAvailable: true } upd)
+        {
+            _checkUpdateBtn.Kind = ModernButtonKind.Primary;
+            _checkUpdateBtn.Text = $"Install Update  ({upd.LatestVersion})";
+        }
+        else
+        {
+            _checkUpdateBtn.Kind = ModernButtonKind.Secondary;
+            _checkUpdateBtn.Text = $"Check for Updates  (v{AppInfo.Version})";
+        }
+    }
+
+    private void ShowUpdateDialog()
+    {
+        if (_availableUpdate is not { UpdateAvailable: true } upd || IsDisposed) return;
+
+        bool wasHidden = !Visible || WindowState == FormWindowState.Minimized;
+        if (wasHidden) ShowFromTray();
+
+        using var dlg = new UpdateDialog(upd, relaunchMinimized: wasHidden);
+        dlg.ShowDialog(this);
+        if (dlg.UpdateLaunched)
+        {
+            _allowClose = true;
+            Close();
         }
     }
 
@@ -2278,6 +2422,16 @@ public sealed class MainForm : Form
         };
         openItem.Click += (_, _) => ShowFromTray();
         items.Add(openItem);
+
+        if (_availableUpdate is { UpdateAvailable: true } upd)
+        {
+            var updateItem = new ToolStripMenuItem($"Update Available ({upd.LatestVersion})…")
+            {
+                ForeColor = Theme.Success
+            };
+            updateItem.Click += (_, _) => ShowUpdateDialog();
+            items.Add(updateItem);
+        }
 
         if (_config.Cards.Count > 0)
         {

@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Drawing.Drawing2D;
+
 namespace AudioProfileSwitcher;
 
 internal abstract class DarkDialog : Form
@@ -428,4 +431,293 @@ internal sealed class DeviceFilterDialog : DarkDialog
             .Where(d => d.Id.HasValue)
             .Select(d => new CycleDeviceEntry { Id = d.Id!.Value, Name = d.Name })
             .ToList();
+}
+
+internal sealed class UpdateDialog : DarkDialog
+{
+    private readonly ReleaseCheckResult _release;
+    private readonly bool _relaunchMinimized;
+    private readonly bool _canSelfUpdate;
+    private readonly DarkProgressBar _progressBar;
+    private readonly Label _statusLbl;
+    private readonly ModernButton _primaryBtn;
+    private readonly ModernButton _githubBtn;
+    private readonly ModernButton _closeBtn;
+
+    private CancellationTokenSource? _cts;
+    private bool _downloading;
+
+    public bool UpdateLaunched { get; private set; }
+
+    public UpdateDialog(ReleaseCheckResult release, bool relaunchMinimized = false)
+        : base("Software Update", new Size(420, 384))
+    {
+        _release = release;
+        _relaunchMinimized = relaunchMinimized;
+
+        bool envAllowsSelfUpdate = UpdateService.CanSelfUpdate(out string? envReason);
+        bool releaseHasVerified = release.HasVerifiedDownload;
+        _canSelfUpdate = envAllowsSelfUpdate && releaseHasVerified;
+
+        var emblem = new Panel
+        {
+            Location = new Point(18, 16),
+            Size = new Size(34, 34),
+            BackColor = Theme.BgMain
+        };
+        emblem.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Gfx.DrawAppEmblem(e.Graphics, new RectangleF(1, 1, 32, 32));
+        };
+
+        var titleLbl = new Label
+        {
+            Text = $"AudioProfileSwitcher {release.LatestVersion} is available",
+            Location = new Point(62, 15),
+            Size = new Size(340, 20),
+            Font = Theme.Header,
+            ForeColor = Theme.TextPrimary,
+            AutoEllipsis = true
+        };
+
+        string sizePart = release.AssetSizeBytes > 0
+            ? $"  ·  {ProfileLogic.FormatByteSize(release.AssetSizeBytes)}"
+            : "";
+        var subLbl = new Label
+        {
+            Text = $"Installed: v{AppInfo.Version}  ·  {AppInfo.BuildFlavorLabel} build{sizePart}",
+            Location = new Point(62, 36),
+            Size = new Size(340, 18),
+            Font = Theme.Small,
+            ForeColor = Theme.TextMuted,
+            AutoEllipsis = true
+        };
+
+        var notesCard = new SectionCard
+        {
+            Location = new Point(18, 82),
+            Size = new Size(384, 164),
+            Padding = new Padding(12, 10, 10, 10)
+        };
+        var notesBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            BorderStyle = BorderStyle.None,
+            ScrollBars = ScrollBars.Vertical,
+            BackColor = Theme.BgSurface,
+            ForeColor = Theme.TextSoft,
+            Font = Theme.Body,
+            TabStop = false,
+            Text = string.IsNullOrWhiteSpace(release.ReleaseNotes)
+                ? "Bug fixes and improvements."
+                : release.ReleaseNotes
+        };
+        notesCard.Controls.Add(notesBox);
+
+        string initialStatus;
+        Color initialColor;
+        if (_canSelfUpdate)
+        {
+            initialStatus = "Verified via SHA-256 checksum. Settings and profiles are preserved.";
+            initialColor = Theme.TextMuted;
+        }
+        else if (!envAllowsSelfUpdate)
+        {
+            initialStatus = envReason ?? "Automatic update isn't available for this installation.";
+            initialColor = Theme.Warning;
+        }
+        else
+        {
+            initialStatus = "This release doesn't include a verified single-file asset for automatic install. Download manually on GitHub.";
+            initialColor = Theme.Warning;
+        }
+
+        _statusLbl = new Label
+        {
+            Text = initialStatus,
+            Location = new Point(18, 258),
+            Size = new Size(384, 34),
+            Font = Theme.Small,
+            ForeColor = initialColor
+        };
+
+        _progressBar = new DarkProgressBar
+        {
+            Location = new Point(18, 298),
+            Size = new Size(384, 10),
+            Visible = false
+        };
+
+        _githubBtn = MakeButton("Release Page", new Point(18, 332), primary: false, width: 110);
+        _githubBtn.Click += (_, _) => OpenReleasePage();
+
+        _primaryBtn = MakeButton(
+            _canSelfUpdate ? "Update & Restart" : "Download on GitHub",
+            new Point(150, 332),
+            primary: true,
+            width: 150);
+        _primaryBtn.Click += (_, _) =>
+        {
+            if (_canSelfUpdate) _ = StartDownloadAndInstallAsync();
+            else OpenReleasePage();
+        };
+
+        _closeBtn = MakeButton("Later", new Point(308, 332), primary: false, width: 94);
+        _closeBtn.Click += (_, _) =>
+        {
+            if (_downloading)
+            {
+                _cts?.Cancel();
+            }
+            else
+            {
+                DialogResult = DialogResult.Cancel;
+                Close();
+            }
+        };
+
+        Controls.AddRange(new Control[]
+        {
+            emblem, titleLbl, subLbl,
+            MakeLabel("WHAT'S NEW", new Point(18, 64)),
+            notesCard,
+            _statusLbl,
+            _progressBar,
+            _githubBtn, _primaryBtn, _closeBtn
+        });
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            if (_downloading) _cts?.Cancel();
+            else
+            {
+                DialogResult = DialogResult.Cancel;
+                Close();
+            }
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (_downloading)
+        {
+            _cts?.Cancel();
+        }
+        base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = null;
+        }
+        base.Dispose(disposing);
+    }
+
+    private void OpenReleasePage()
+    {
+        try
+        {
+            string safeUrl = ProfileLogic.SanitizeReleaseUrl(_release.ReleaseUrl);
+            Process.Start(new ProcessStartInfo { FileName = safeUrl, UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to open GitHub release page", ex);
+            _statusLbl.Text = "Couldn't open browser: " + ex.Message;
+            _statusLbl.ForeColor = Theme.Danger;
+        }
+    }
+
+    private async Task StartDownloadAndInstallAsync()
+    {
+        if (_downloading) return;
+        _downloading = true;
+        _primaryBtn.Enabled = false;
+        _primaryBtn.Text = "Updating…";
+        _closeBtn.Text = "Cancel";
+        _progressBar.Visible = true;
+        _progressBar.Indeterminate = true;
+        _progressBar.Value = 0;
+        _statusLbl.ForeColor = Theme.TextSoft;
+        _statusLbl.Text = "Preparing verified download…";
+
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+
+        var progress = new Progress<UpdateDownloadProgress>(p =>
+        {
+            if (IsDisposed) return;
+            _progressBar.Indeterminate = p.Indeterminate;
+            if (!p.Indeterminate) _progressBar.Value = p.Percent;
+
+            if (p.TotalBytes > 0 && !p.Indeterminate)
+            {
+                _statusLbl.Text =
+                    $"{p.Stage}  {ProfileLogic.FormatByteSize(p.BytesReceived)} / {ProfileLogic.FormatByteSize(p.TotalBytes)} ({p.Percent}%)";
+            }
+            else
+            {
+                _statusLbl.Text = p.Stage;
+            }
+        });
+
+        try
+        {
+            var staged = await UpdateService.DownloadAndVerifyUpdateAsync(_release, progress, token);
+            if (IsDisposed) return;
+
+            _progressBar.Indeterminate = false;
+            _progressBar.Value = 100;
+            _statusLbl.ForeColor = Theme.Success;
+            _statusLbl.Text = "SHA-256 verified! Restarting AudioSwitcher…";
+            _closeBtn.Enabled = false;
+
+            await Task.Delay(250, CancellationToken.None);
+            if (IsDisposed) return;
+
+            UpdateService.LaunchStagedUpdater(staged, _relaunchMinimized);
+            UpdateLaunched = true;
+            _downloading = false;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (OperationCanceledException)
+        {
+            if (IsDisposed) return;
+            _downloading = false;
+            _progressBar.Indeterminate = false;
+            _progressBar.Visible = false;
+            _statusLbl.ForeColor = Theme.TextMuted;
+            _statusLbl.Text = "Download cancelled.";
+            _primaryBtn.Enabled = true;
+            _primaryBtn.Text = "Update & Restart";
+            _closeBtn.Text = "Later";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Self-update failed", ex);
+            if (IsDisposed) return;
+            _downloading = false;
+            _progressBar.Indeterminate = false;
+            _progressBar.Visible = false;
+            _statusLbl.ForeColor = Theme.Danger;
+            _statusLbl.Text = "Update failed: " + ex.Message;
+            _primaryBtn.Enabled = true;
+            _primaryBtn.Text = "Retry Update";
+            _closeBtn.Text = "Later";
+        }
+    }
 }

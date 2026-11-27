@@ -623,4 +623,140 @@ public sealed class AudioProfileSwitcherTests
         Assert.True(changed);
         Assert.Equal(newMic, cfg.VoiceInputDeviceId);
     }
+
+    [Fact]
+    public void ParseLatestRelease_ExtractsMatchingFlavorAssetChecksumsAndNotes()
+    {
+        const string shaLight = "a78caa8fdacaafdc630723ca2198edeb9d7a01bab667c78af647db236b399e66";
+        const string shaStand = "74852bf36d173214b131300903e97c0647dc6dc4cd724230638755f6228e8c2d";
+        string json = $$"""
+        {
+          "tag_name": "v1.7.0",
+          "html_url": "https://github.com/chryow/AudioProfileSwitcher/releases/tag/v1.7.0",
+          "body": "## Highlights\n- **Self-updater** with [SHA-256](https://example.com) checks\n\n---\n### Which file should I download?\n| Table | Stuff |",
+          "assets": [
+            {
+              "name": "AudioProfileSwitcher.exe",
+              "size": 1462118,
+              "digest": "sha256:{{shaLight}}",
+              "browser_download_url": "https://github.com/chryow/AudioProfileSwitcher/releases/download/v1.7.0/AudioProfileSwitcher.exe"
+            },
+            {
+              "name": "AudioProfileSwitcher-standalone.exe",
+              "size": 72136014,
+              "digest": "sha256:{{shaStand}}",
+              "browser_download_url": "https://github.com/chryow/AudioProfileSwitcher/releases/download/v1.7.0/AudioProfileSwitcher-standalone.exe"
+            },
+            {
+              "name": "SHA256SUMS.txt",
+              "size": 198,
+              "browser_download_url": "https://github.com/chryow/AudioProfileSwitcher/releases/download/v1.7.0/SHA256SUMS.txt"
+            }
+          ]
+        }
+        """;
+
+        var light = ProfileLogic.ParseLatestRelease(json, "1.6.0", AppInfo.LightweightAssetName);
+        Assert.True(light.UpdateAvailable);
+        Assert.True(light.HasVerifiedDownload);
+        Assert.Equal("AudioProfileSwitcher.exe", light.AssetName);
+        Assert.Equal(1462118, light.AssetSizeBytes);
+        Assert.Equal(shaLight, light.AssetSha256);
+        Assert.Equal("https://github.com/chryow/AudioProfileSwitcher/releases/download/v1.7.0/SHA256SUMS.txt", light.ChecksumsUrl);
+        Assert.Contains("Self-updater with SHA-256 checks", light.ReleaseNotes);
+        Assert.DoesNotContain("Which file should I download?", light.ReleaseNotes);
+
+        var standalone = ProfileLogic.ParseLatestRelease(json, "1.6.0", AppInfo.StandaloneAssetName);
+        Assert.True(standalone.HasVerifiedDownload);
+        Assert.Equal("AudioProfileSwitcher-standalone.exe", standalone.AssetName);
+        Assert.Equal(shaStand, standalone.AssetSha256);
+    }
+
+    [Fact]
+    public void ParseLatestRelease_RejectsUntrustedAssetUrlsAndOutOfBoundsSizes()
+    {
+        const string json = """
+        {
+          "tag_name": "v2.0.0",
+          "html_url": "https://github.com/chryow/AudioProfileSwitcher/releases/tag/v2.0.0",
+          "assets": [
+            {
+              "name": "AudioProfileSwitcher.exe",
+              "size": 1000000,
+              "digest": "sha256:a78caa8fdacaafdc630723ca2198edeb9d7a01bab667c78af647db236b399e66",
+              "browser_download_url": "https://evil.example/AudioProfileSwitcher.exe"
+            },
+            {
+              "name": "AudioProfileSwitcher-standalone.exe",
+              "size": 512,
+              "digest": "sha256:74852bf36d173214b131300903e97c0647dc6dc4cd724230638755f6228e8c2d",
+              "browser_download_url": "https://github.com/chryow/AudioProfileSwitcher/releases/download/v2.0.0/AudioProfileSwitcher-standalone.exe"
+            }
+          ]
+        }
+        """;
+
+        var light = ProfileLogic.ParseLatestRelease(json, "1.6.0", AppInfo.LightweightAssetName);
+        Assert.True(light.UpdateAvailable);
+        Assert.False(light.HasVerifiedDownload);
+        Assert.Null(light.AssetDownloadUrl);
+
+        var tooSmall = ProfileLogic.ParseLatestRelease(json, "1.6.0", AppInfo.StandaloneAssetName);
+        Assert.False(tooSmall.HasVerifiedDownload);
+        Assert.Null(tooSmall.AssetDownloadUrl);
+    }
+
+    [Fact]
+    public void ParseSha256Sums_AndResolveExpectedSha256_EnforceIntegrityAndDetectMismatch()
+    {
+        const string hashA = "a78caa8fdacaafdc630723ca2198edeb9d7a01bab667c78af647db236b399e66";
+        const string hashB = "74852bf36d173214b131300903e97c0647dc6dc4cd724230638755f6228e8c2d";
+        string sums = $"""
+        # Release checksums
+        {hashA.ToUpperInvariant()}  AudioProfileSwitcher.exe
+        {hashB} *./AudioProfileSwitcher-standalone.exe
+        """;
+
+        Assert.Equal(hashA, ProfileLogic.ParseSha256Sums(sums, "AudioProfileSwitcher.exe"));
+        Assert.Equal(hashB, ProfileLogic.ParseSha256Sums(sums, "AudioProfileSwitcher-standalone.exe"));
+        Assert.Null(ProfileLogic.ParseSha256Sums(sums, "Missing.exe"));
+
+        Assert.Equal(hashA, ProfileLogic.ResolveExpectedSha256($"sha256:{hashA}", hashA));
+        Assert.Equal(hashA, ProfileLogic.ResolveExpectedSha256(null, hashA));
+        Assert.Equal(hashB, ProfileLogic.ResolveExpectedSha256(hashB, null));
+        Assert.Null(ProfileLogic.ResolveExpectedSha256("not-a-hash", null));
+
+        Assert.Throws<InvalidDataException>(() => ProfileLogic.ResolveExpectedSha256(hashA, hashB));
+    }
+
+    [Theory]
+    [InlineData("https://github.com/chryow/AudioProfileSwitcher/releases/download/v1.6.0/AudioProfileSwitcher.exe", true)]
+    [InlineData("https://objects.githubusercontent.com/github-production-release-asset-2e65be/12345/asset", true)]
+    [InlineData("https://release-assets.githubusercontent.com/github-production-release-asset/file.exe", true)]
+    [InlineData("https://github-releases.githubusercontent.com/123/file.exe", true)]
+    [InlineData("http://objects.githubusercontent.com/file.exe", false)]
+    [InlineData("https://github.com/other/repo/releases/download/v1.0.0/file.exe", false)]
+    [InlineData("https://evil.example/AudioProfileSwitcher.exe", false)]
+    [InlineData("https://user@objects.githubusercontent.com/file.exe", false)]
+    [InlineData("https://objects.githubusercontent.com:8443/file.exe", false)]
+    [InlineData("file:///C:/Temp/AudioProfileSwitcher.exe", false)]
+    public void IsAllowedUpdateDownloadUri_EnforcesStrictGitHubHttpsAllowlist(string url, bool expected)
+    {
+        Assert.True(Uri.TryCreate(url, UriKind.Absolute, out var uri));
+        Assert.Equal(expected, ProfileLogic.IsAllowedUpdateDownloadUri(uri));
+    }
+
+    [Fact]
+    public void IsPathStrictlyInsideDirectory_PreventsPrefixConfusionAndTraversal()
+    {
+        string baseDir = Path.Combine(Path.GetTempPath(), "aps-updates-test");
+        string inside = Path.Combine(baseDir, "AudioProfileSwitcher-update-v1.6.0.exe");
+        string siblingPrefix = Path.Combine(Path.GetTempPath(), "aps-updates-test-evil", "app.exe");
+        string traversal = Path.Combine(baseDir, "..", "outside.exe");
+
+        Assert.True(ProfileLogic.IsPathStrictlyInsideDirectory(inside, baseDir));
+        Assert.False(ProfileLogic.IsPathStrictlyInsideDirectory(siblingPrefix, baseDir));
+        Assert.False(ProfileLogic.IsPathStrictlyInsideDirectory(traversal, baseDir));
+        Assert.False(ProfileLogic.IsPathStrictlyInsideDirectory(baseDir, baseDir));
+    }
 }
