@@ -2215,3 +2215,106 @@ internal sealed class MuteBannerForm : OverlayForm
         if (!Visible) Show();
     }
 }
+
+/// <summary>Rounded dark-obsidian progress bar with indigo→violet gradient fill and smooth indeterminate pulse.</summary>
+internal sealed class DarkProgressBar : Control
+{
+    private readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 25 };
+    private int _value;
+    private bool _indeterminate;
+    private float _pulsePos = -0.35f;
+
+    public DarkProgressBar()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Size = new Size(340, 10);
+        BackColor = Theme.BgMain;
+        _animTimer.Tick += (_, _) =>
+        {
+            _pulsePos += 0.035f;
+            if (_pulsePos > 1.05f) _pulsePos = -0.35f;
+            Invalidate();
+        };
+    }
+
+    public int Value
+    {
+        get => _value;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_value != clamped)
+            {
+                _value = clamped;
+                Invalidate();
+            }
+        }
+    }
+
+    public bool Indeterminate
+    {
+        get => _indeterminate;
+        set
+        {
+            if (_indeterminate == value) return;
+            _indeterminate = value;
+            if (_indeterminate)
+            {
+                _pulsePos = -0.35f;
+                _animTimer.Start();
+            }
+            else
+            {
+                _animTimer.Stop();
+            }
+            Invalidate();
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.BgMain);
+
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        if (r.Width <= 2 || r.Height <= 2) return;
+        int rad = Math.Max(2, r.Height / 2);
+
+        using var trackPath = Gfx.RoundRect(r, rad);
+        using (var trackBrush = new SolidBrush(Theme.BgElevated)) g.FillPath(trackBrush, trackPath);
+
+        g.SetClip(trackPath);
+        if (_indeterminate)
+        {
+            int segW = Math.Max(24, (int)(r.Width * 0.32f));
+            int segX = (int)(_pulsePos * r.Width);
+            var segRect = new Rectangle(segX, r.Y, segW, r.Height);
+            if (segRect.Width > 0)
+            {
+                Gfx.FillGradientRoundRect(g, segRect, rad, Theme.Accent, Theme.AccentEnd, 0f);
+            }
+        }
+        else if (_value > 0)
+        {
+            int fillW = Math.Max(r.Height, (int)Math.Round(r.Width * (_value / 100.0)));
+            var fillRect = new Rectangle(r.X, r.Y, Math.Min(r.Width, fillW), r.Height);
+            Gfx.FillGradientRoundRect(g, fillRect, rad, Theme.Accent, Theme.AccentEnd, 0f);
+        }
+        g.ResetClip();
+
+        using var border = new Pen(Theme.BgBorder, 1f);
+        g.DrawPath(border, trackPath);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _animTimer.Stop();
+            _animTimer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}

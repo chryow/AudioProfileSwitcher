@@ -5,9 +5,21 @@ namespace AudioProfileSwitcher;
 
 public static class AppInfo
 {
-    public const string Version = "1.5.1";
+    public const string Version = "1.6.0";
     public const string ReleasesPageUrl = "https://github.com/chryow/AudioProfileSwitcher/releases";
     public const string LatestReleaseApiUrl = "https://api.github.com/repos/chryow/AudioProfileSwitcher/releases/latest";
+    public const string LightweightAssetName = "AudioProfileSwitcher.exe";
+    public const string StandaloneAssetName = "AudioProfileSwitcher-standalone.exe";
+    public const string ChecksumsAssetName = "SHA256SUMS.txt";
+#if SELF_CONTAINED_BUILD
+    public const bool IsSelfContainedBuild = true;
+    public const string PreferredAssetName = StandaloneAssetName;
+    public const string BuildFlavorLabel = "Standalone";
+#else
+    public const bool IsSelfContainedBuild = false;
+    public const string PreferredAssetName = LightweightAssetName;
+    public const string BuildFlavorLabel = "Lightweight";
+#endif
 }
 
 #if !WINDOWS
@@ -197,6 +209,7 @@ public class AppConfig
     public Guid? VoiceInputDeviceId { get; set; }
     public string VoiceInputDeviceName { get; set; } = "Default";
     public int VoiceConfidencePercent { get; set; } = 78;
+    public bool AutoCheckUpdates { get; set; } = true;
     public bool TrayHintShown { get; set; }
 }
 
@@ -218,6 +231,17 @@ public readonly record struct VoiceCommand(
     Guid? CardId = null,
     string Phrase = "",
     float Confidence = 1f);
+
+/// <summary>One-shot manifest written in %AppData%\AudioProfileSwitcher\updates before applying a verified update.</summary>
+public sealed class PendingUpdateManifest
+{
+    public int ParentPid { get; set; }
+    public string TargetPath { get; set; } = "";
+    public string StagedPath { get; set; } = "";
+    public string ExpectedSha256 { get; set; } = "";
+    public string TargetVersion { get; set; } = "";
+    public bool RelaunchMinimized { get; set; }
+}
 
 /// <summary>Portable JSON bundle for exporting/importing cards and cycle filters across PCs.</summary>
 public sealed class ProfileExportBundle

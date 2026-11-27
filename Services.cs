@@ -1,6 +1,10 @@
+using System.Diagnostics;
 using System.Media;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 
@@ -695,11 +699,32 @@ internal static class PolicyConfigClient
     }
 }
 
+internal readonly record struct UpdateDownloadProgress(
+    string Stage,
+    long BytesReceived,
+    long TotalBytes,
+    bool Indeterminate)
+{
+    public int Percent => TotalBytes > 0
+        ? Math.Clamp((int)Math.Round(BytesReceived * 100.0 / TotalBytes), 0, 100)
+        : 0;
+}
+
+internal readonly record struct StagedUpdate(
+    string FilePath,
+    string Sha256,
+    string Version);
+
 internal static class UpdateService
 {
-    private static readonly HttpClient Http = CreateClient();
+    private static readonly HttpClient ApiHttp = CreateApiClient();
+    private static readonly HttpClient DownloadHttp = CreateDownloadClient();
+    private static readonly JsonSerializerOptions ManifestJsonOpts = new() { WriteIndented = true };
 
-    private static HttpClient CreateClient()
+    public static string UpdatesDir { get; } = Path.Combine(AppLog.DataDir, "updates");
+    private static string ManifestPath { get; } = Path.Combine(UpdatesDir, "pending-update.json");
+
+    private static HttpClient CreateApiClient()
     {
         var handler = new SocketsHttpHandler
         {
@@ -716,9 +741,68 @@ internal static class UpdateService
         return client;
     }
 
+    private static HttpClient CreateDownloadClient()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false
+        };
+        var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromMinutes(5)
+        };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("AudioProfileSwitcher", AppInfo.Version));
+        return client;
+    }
+
+    public static bool CanSelfUpdate(out string? reason)
+    {
+        reason = null;
+        string? exePath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+        {
+            reason = "Unable to locate the running executable.";
+            return false;
+        }
+
+        string fileName = Path.GetFileName(exePath);
+        if (!fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "Self-update is only available for packaged single-file Windows builds.";
+            return false;
+        }
+
+        string? dir = Path.GetDirectoryName(exePath);
+        if (string.IsNullOrEmpty(dir))
+        {
+            reason = "Unable to determine installation folder.";
+            return false;
+        }
+
+        if (File.Exists(Path.Combine(dir, "AudioProfileSwitcher.dll")))
+        {
+            reason = "Development folder build detected — download a release build from GitHub.";
+            return false;
+        }
+
+        try
+        {
+            string probe = Path.Combine(dir, $".aps-write-probe-{Guid.NewGuid():N}.tmp");
+            using (File.Create(probe)) { }
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            reason = "Installed in a protected folder — download manually from GitHub or move the app to a user folder for 1-click updates.";
+            return false;
+        }
+    }
+
     public static async Task<ReleaseCheckResult> CheckForUpdatesAsync(CancellationToken ct = default)
     {
-        using var resp = await Http.GetAsync(
+        using var resp = await ApiHttp.GetAsync(
             AppInfo.LatestReleaseApiUrl,
             HttpCompletionOption.ResponseHeadersRead,
             ct).ConfigureAwait(false);
@@ -732,8 +816,393 @@ internal static class UpdateService
             throw new InvalidOperationException("Unexpected update server host.");
         }
 
-        if (resp.Content.Headers.ContentLength > ProfileLogic.MaxUpdateResponseBytes)
-            throw new InvalidDataException("Update metadata response exceeded size limit.");
+        var json = await ReadBoundedTextAsync(resp, ProfileLogic.MaxUpdateResponseBytes, ct).ConfigureAwait(false);
+        return ProfileLogic.ParseLatestRelease(json, AppInfo.Version);
+    }
+
+    public static async Task<StagedUpdate> DownloadAndVerifyUpdateAsync(
+        ReleaseCheckResult release,
+        IProgress<UpdateDownloadProgress>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (!release.HasVerifiedDownload ||
+            string.IsNullOrEmpty(release.AssetName) ||
+            string.IsNullOrEmpty(release.AssetDownloadUrl))
+        {
+            throw new InvalidOperationException("This release does not include a verifiable executable download for this build.");
+        }
+
+        // 1. Resolve and cross-check SHA-256 checksum before saving the executable.
+        progress?.Report(new UpdateDownloadProgress("Fetching SHA-256 checksum…", 0, release.AssetSizeBytes, Indeterminate: true));
+        string? sumsHash = null;
+        if (!string.IsNullOrEmpty(release.ChecksumsUrl))
+        {
+            using var sumsResp = await SendWithValidatedRedirectsAsync(release.ChecksumsUrl, ct).ConfigureAwait(false);
+            string sumsText = await ReadBoundedTextAsync(sumsResp, ProfileLogic.MaxChecksumsBytes, ct).ConfigureAwait(false);
+            sumsHash = ProfileLogic.ParseSha256Sums(sumsText, release.AssetName);
+        }
+
+        string? expectedSha256 = ProfileLogic.ResolveExpectedSha256(release.AssetSha256, sumsHash);
+        if (string.IsNullOrEmpty(expectedSha256))
+        {
+            throw new InvalidOperationException("This release does not provide a verifiable SHA-256 checksum.");
+        }
+
+        // 2. Stream the executable into %AppData%\AudioProfileSwitcher\updates\ with strict size bounds.
+        Directory.CreateDirectory(UpdatesDir);
+        TryCleanUpdatesDirectory(excludePath: null);
+
+        string tmpPath = Path.Combine(UpdatesDir, $"download-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using var resp = await SendWithValidatedRedirectsAsync(release.AssetDownloadUrl, ct).ConfigureAwait(false);
+            long? contentLen = resp.Content.Headers.ContentLength;
+            if (contentLen.HasValue && contentLen.Value > ProfileLogic.MaxUpdateBinaryBytes)
+                throw new InvalidDataException("Update binary exceeded maximum allowed size.");
+
+            long totalBytes = contentLen is > 0 ? contentLen.Value : release.AssetSizeBytes;
+            progress?.Report(new UpdateDownloadProgress($"Downloading {release.AssetName}…", 0, totalBytes, Indeterminate: totalBytes <= 0));
+
+            await using (var src = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
+            await using (var dst = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, useAsync: true))
+            {
+                var buffer = new byte[65536];
+                long received = 0;
+                long lastTick = Environment.TickCount64;
+
+                while (true)
+                {
+                    int read = await src.ReadAsync(buffer, ct).ConfigureAwait(false);
+                    if (read == 0) break;
+
+                    received += read;
+                    if (received > ProfileLogic.MaxUpdateBinaryBytes)
+                        throw new InvalidDataException("Update binary exceeded maximum allowed size.");
+
+                    await dst.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+
+                    long now = Environment.TickCount64;
+                    if (now - lastTick >= 75 || (totalBytes > 0 && received >= totalBytes))
+                    {
+                        lastTick = now;
+                        progress?.Report(new UpdateDownloadProgress(
+                            $"Downloading {release.AssetName}…",
+                            received,
+                            totalBytes,
+                            Indeterminate: totalBytes <= 0));
+                    }
+                }
+
+                await dst.FlushAsync(ct).ConfigureAwait(false);
+
+                if (received < ProfileLogic.MinUpdateBinaryBytes)
+                    throw new InvalidDataException("Downloaded file is unexpectedly small and may be corrupted.");
+            }
+
+            // 3. Re-read staged file from disk to verify Windows PE ("MZ") header and SHA-256 digest.
+            progress?.Report(new UpdateDownloadProgress("Verifying SHA-256 integrity…", totalBytes, totalBytes, Indeterminate: true));
+            await VerifyFilePeAndSha256Async(tmpPath, expectedSha256, ct).ConfigureAwait(false);
+
+            string safeVer = SanitizeFileToken(release.LatestVersion);
+            string stagedPath = Path.Combine(UpdatesDir, $"AudioProfileSwitcher-update-{safeVer}.exe");
+            File.Move(tmpPath, stagedPath, overwrite: true);
+
+            AppLog.Info($"Downloaded and verified update {release.LatestVersion} ({release.AssetName}, SHA-256: {expectedSha256[..12]}…).");
+            return new StagedUpdate(stagedPath, expectedSha256, release.LatestVersion);
+        }
+        catch
+        {
+            TryDeleteFile(tmpPath);
+            throw;
+        }
+    }
+
+    public static bool LaunchStagedUpdater(StagedUpdate staged, bool relaunchMinimized)
+    {
+        string? targetPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(targetPath) || !File.Exists(targetPath))
+            throw new InvalidOperationException("Unable to locate the running executable.");
+
+        var manifest = new PendingUpdateManifest
+        {
+            ParentPid = Environment.ProcessId,
+            TargetPath = Path.GetFullPath(targetPath),
+            StagedPath = Path.GetFullPath(staged.FilePath),
+            ExpectedSha256 = staged.Sha256,
+            TargetVersion = staged.Version,
+            RelaunchMinimized = relaunchMinimized
+        };
+
+        Directory.CreateDirectory(UpdatesDir);
+        string tmpManifest = ManifestPath + ".tmp";
+        File.WriteAllText(tmpManifest, JsonSerializer.Serialize(manifest, ManifestJsonOpts));
+        File.Move(tmpManifest, ManifestPath, overwrite: true);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = staged.FilePath,
+            WorkingDirectory = UpdatesDir,
+            UseShellExecute = false
+        };
+        psi.ArgumentList.Add("--apply-update");
+
+        var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start staged updater process.");
+        proc.Dispose();
+        AppLog.Info($"Launched staged updater for {staged.Version}; exiting current instance.");
+        return true;
+    }
+
+    /// <summary>
+    /// Internal one-shot update applier invoked when the verified staged EXE is started with --apply-update.
+    /// Strictly refuses to run outside %AppData%\AudioProfileSwitcher\updates\ or without a verified manifest.
+    /// </summary>
+    public static void RunApplyUpdateMode()
+    {
+        string? currentExe = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(currentExe) || !File.Exists(currentExe))
+        {
+            AppLog.Warn("Updater aborted: missing current executable path.");
+            return;
+        }
+
+        if (!ProfileLogic.IsPathStrictlyInsideDirectory(currentExe, UpdatesDir))
+        {
+            AppLog.Warn("Updater aborted: --apply-update can only run from the app's updates staging directory.");
+            return;
+        }
+
+        PendingUpdateManifest? manifest = null;
+        try
+        {
+            if (!File.Exists(ManifestPath))
+            {
+                AppLog.Warn("Updater aborted: pending-update.json not found.");
+                return;
+            }
+            string json = File.ReadAllText(ManifestPath);
+            TryDeleteFile(ManifestPath);
+            manifest = JsonSerializer.Deserialize<PendingUpdateManifest>(json);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Updater aborted: failed to read pending-update.json", ex);
+            return;
+        }
+
+        if (manifest == null) return;
+
+        string fullCurrent = Path.GetFullPath(currentExe);
+        string fullStaged;
+        string fullTarget;
+        try
+        {
+            fullStaged = Path.GetFullPath(manifest.StagedPath);
+            fullTarget = Path.GetFullPath(manifest.TargetPath);
+        }
+        catch
+        {
+            AppLog.Warn("Updater aborted: invalid manifest paths.");
+            return;
+        }
+
+        if (!fullCurrent.Equals(fullStaged, StringComparison.OrdinalIgnoreCase))
+        {
+            AppLog.Warn("Updater aborted: staged executable path does not match manifest.");
+            return;
+        }
+
+        if (!fullTarget.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(fullTarget))
+        {
+            AppLog.Warn("Updater aborted: target executable does not exist or is invalid.");
+            return;
+        }
+
+        try
+        {
+            if ((File.GetAttributes(fullTarget) & FileAttributes.ReparsePoint) != 0)
+            {
+                AppLog.Warn("Updater aborted: target executable is a symlink/reparse point.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Updater aborted: could not inspect target file attributes", ex);
+            return;
+        }
+
+        string? expectedSha256 = ProfileLogic.NormalizeSha256Hex(manifest.ExpectedSha256);
+        if (expectedSha256 == null)
+        {
+            AppLog.Warn("Updater aborted: missing or invalid expected SHA-256.");
+            return;
+        }
+
+        try
+        {
+            VerifyFilePeAndSha256Async(fullCurrent, expectedSha256, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Updater aborted: staged binary failed self-integrity verification", ex);
+            return;
+        }
+
+        // Wait cleanly for the previous instance to exit and release its file/mutex handles.
+        if (manifest.ParentPid > 0 && manifest.ParentPid != Environment.ProcessId)
+        {
+            try
+            {
+                using var parent = Process.GetProcessById(manifest.ParentPid);
+                parent.WaitForExit(15_000);
+            }
+            catch { /* parent already exited */ }
+        }
+
+        string targetTmp = fullTarget + ".update.tmp";
+        Exception? lastError = null;
+        bool replaced = false;
+
+        try
+        {
+            File.Copy(fullCurrent, targetTmp, overwrite: true);
+            for (int attempt = 0; attempt < 25; attempt++)
+            {
+                try
+                {
+                    File.Move(targetTmp, fullTarget, overwrite: true);
+                    replaced = true;
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    lastError = ex;
+                    Thread.Sleep(250);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lastError = ex;
+        }
+
+        if (!replaced)
+        {
+            TryDeleteFile(targetTmp);
+            AppLog.Error($"Updater failed to replace '{fullTarget}'", lastError);
+            try
+            {
+                MessageBox.Show(
+                    $"AudioSwitcher couldn't finish replacing the executable:\n\n{lastError?.Message ?? "File is locked or access was denied."}\n\nYour existing version was not modified.",
+                    "AudioSwitcher Update Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            catch { }
+
+            RelaunchTarget(fullTarget, updatedVersion: null, minimized: manifest.RelaunchMinimized);
+            return;
+        }
+
+        string safeVersion = ProfileLogic.SanitizeDisplayString(manifest.TargetVersion, 32, $"v{AppInfo.Version}");
+        AppLog.Info($"Updated executable '{fullTarget}' to {safeVersion}. Relaunching…");
+        RelaunchTarget(fullTarget, updatedVersion: safeVersion, minimized: manifest.RelaunchMinimized);
+    }
+
+    public static void CleanupStagedUpdatesAsync()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!Directory.Exists(UpdatesDir)) return;
+                await Task.Delay(1500).ConfigureAwait(false);
+                TryCleanUpdatesDirectory(excludePath: null);
+                if (Directory.Exists(UpdatesDir) && Directory.EnumerateFileSystemEntries(UpdatesDir).Any())
+                {
+                    await Task.Delay(2500).ConfigureAwait(false);
+                    TryCleanUpdatesDirectory(excludePath: null);
+                }
+                if (Directory.Exists(UpdatesDir) && !Directory.EnumerateFileSystemEntries(UpdatesDir).Any())
+                {
+                    Directory.Delete(UpdatesDir);
+                }
+            }
+            catch { /* best-effort cleanup */ }
+        });
+    }
+
+    private static void RelaunchTarget(string targetPath, string? updatedVersion, bool minimized)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = targetPath,
+                WorkingDirectory = Path.GetDirectoryName(targetPath) ?? AppLog.DataDir,
+                UseShellExecute = false
+            };
+            if (!string.IsNullOrEmpty(updatedVersion))
+            {
+                psi.ArgumentList.Add("--updated-to");
+                psi.ArgumentList.Add(updatedVersion);
+            }
+            if (minimized)
+            {
+                psi.ArgumentList.Add("--minimized");
+            }
+            using var child = Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Failed to relaunch AudioProfileSwitcher after update", ex);
+        }
+    }
+
+    private static async Task<HttpResponseMessage> SendWithValidatedRedirectsAsync(string startUrl, CancellationToken ct)
+    {
+        const int maxRedirects = 5;
+        if (!Uri.TryCreate(startUrl, UriKind.Absolute, out var currentUri) ||
+            !ProfileLogic.IsAllowedUpdateDownloadUri(currentUri))
+        {
+            throw new InvalidOperationException("Blocked download from untrusted host.");
+        }
+
+        for (int hop = 0; hop <= maxRedirects; hop++)
+        {
+            var resp = await DownloadHttp.GetAsync(currentUri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            int code = (int)resp.StatusCode;
+            if (code is 301 or 302 or 303 or 307 or 308 && resp.Headers.Location != null)
+            {
+                var nextUri = resp.Headers.Location.IsAbsoluteUri
+                    ? resp.Headers.Location
+                    : new Uri(currentUri, resp.Headers.Location);
+                resp.Dispose();
+
+                if (!ProfileLogic.IsAllowedUpdateDownloadUri(nextUri))
+                    throw new InvalidOperationException("Blocked update redirect to untrusted host.");
+
+                currentUri = nextUri;
+                continue;
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                using (resp)
+                {
+                    resp.EnsureSuccessStatusCode();
+                }
+            }
+            return resp;
+        }
+
+        throw new InvalidOperationException("Too many redirects while downloading update.");
+    }
+
+    private static async Task<string> ReadBoundedTextAsync(HttpResponseMessage resp, int maxBytes, CancellationToken ct)
+    {
+        if (resp.Content.Headers.ContentLength > maxBytes)
+            throw new InvalidDataException("Update response exceeded size limit.");
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var ms = new MemoryStream();
@@ -744,13 +1213,57 @@ internal static class UpdateService
             int read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
             if (read == 0) break;
             total += read;
-            if (total > ProfileLogic.MaxUpdateResponseBytes)
-                throw new InvalidDataException("Update metadata response exceeded size limit.");
+            if (total > maxBytes)
+                throw new InvalidDataException("Update response exceeded size limit.");
             ms.Write(buffer, 0, read);
         }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
 
-        var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
-        return ProfileLogic.ParseLatestRelease(json, AppInfo.Version);
+    private static async Task VerifyFilePeAndSha256Async(string filePath, string expectedSha256Hex, CancellationToken ct)
+    {
+        var info = new FileInfo(filePath);
+        if (!info.Exists || info.Length < ProfileLogic.MinUpdateBinaryBytes || info.Length > ProfileLogic.MaxUpdateBinaryBytes)
+            throw new InvalidDataException("Update binary size is outside expected safety bounds.");
+
+        await using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+        var magic = new byte[2];
+        int magicRead = await fs.ReadAsync(magic, ct).ConfigureAwait(false);
+        if (magicRead < 2 || magic[0] != (byte)'M' || magic[1] != (byte)'Z')
+            throw new InvalidDataException("Downloaded file is not a valid Windows executable.");
+
+        fs.Position = 0;
+        byte[] actualHash = await SHA256.HashDataAsync(fs, ct).ConfigureAwait(false);
+        byte[] expectedHash = Convert.FromHexString(expectedSha256Hex);
+
+        if (!CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
+            throw new InvalidDataException("Downloaded update failed SHA-256 integrity verification.");
+    }
+
+    private static string SanitizeFileToken(string raw)
+    {
+        var sb = new StringBuilder(raw.Length);
+        foreach (char ch in raw)
+        {
+            if (char.IsLetterOrDigit(ch) || ch is '.' or '-' or '_') sb.Append(ch);
+        }
+        return sb.Length > 0 ? sb.ToString() : "latest";
+    }
+
+    private static void TryCleanUpdatesDirectory(string? excludePath)
+    {
+        if (!Directory.Exists(UpdatesDir)) return;
+        foreach (var file in Directory.EnumerateFiles(UpdatesDir))
+        {
+            if (excludePath != null && Path.GetFullPath(file).Equals(Path.GetFullPath(excludePath), StringComparison.OrdinalIgnoreCase))
+                continue;
+            TryDeleteFile(file);
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 }
 

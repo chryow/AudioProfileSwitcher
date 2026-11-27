@@ -1,14 +1,28 @@
 using System.Drawing;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace AudioProfileSwitcher;
 
 public readonly record struct ReleaseCheckResult(
     bool UpdateAvailable,
     string LatestVersion,
-    string ReleaseUrl);
+    string ReleaseUrl,
+    string? AssetName = null,
+    string? AssetDownloadUrl = null,
+    long AssetSizeBytes = 0,
+    string? AssetSha256 = null,
+    string? ChecksumsUrl = null,
+    string? ReleaseNotes = null)
+{
+    public bool HasVerifiedDownload =>
+        !string.IsNullOrEmpty(AssetName) &&
+        !string.IsNullOrEmpty(AssetDownloadUrl) &&
+        (!string.IsNullOrEmpty(AssetSha256) || !string.IsNullOrEmpty(ChecksumsUrl));
+}
 
 /// <summary>
 /// Platform-independent profile, migration, device-relinking, fallback, layout, import/export,
@@ -601,9 +615,18 @@ public static class ProfileLogic
 
     public const int MaxProfileJsonBytes = 1024 * 1024; // 1 MiB
     public const int MaxUpdateResponseBytes = 256 * 1024; // 256 KiB
+    public const int MaxChecksumsBytes = 16 * 1024; // 16 KiB
+    public const long MinUpdateBinaryBytes = 64L * 1024; // 64 KiB
+    public const long MaxUpdateBinaryBytes = 150L * 1024 * 1024; // 150 MiB
+    public const int MaxReleaseNotesLength = 2400;
     public const int MaxImportedCards = 100;
     public const int MaxImportedCycleEntries = 200;
     public const int MaxNameLength = 128;
+
+    private static readonly Regex MarkdownLinkRegex = new(
+        @"\[([^\]\r\n]+)\]\([^\)\r\n]+\)",
+        RegexOptions.Compiled,
+        TimeSpan.FromMilliseconds(150));
 
     public static string SanitizeDisplayString(string? value, int maxLength = MaxNameLength, string fallback = "")
     {
@@ -637,6 +660,46 @@ public static class ProfileLogic
             uri.AbsolutePath.StartsWith("/chryow/AudioProfileSwitcher/releases", StringComparison.OrdinalIgnoreCase);
 
         return valid ? uri.AbsoluteUri : AppInfo.ReleasesPageUrl;
+    }
+
+    /// <summary>
+    /// Validates a GitHub release asset browser_download_url strictly under this repository's releases/download/ path.
+    /// Returns null if the URL does not pass strict allowlist checks.
+    /// </summary>
+    public static string? SanitizeReleaseAssetUrl(string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate)) return null;
+        if (!Uri.TryCreate(candidate.Trim(), UriKind.Absolute, out var uri))
+            return null;
+
+        bool valid =
+            uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+            uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+            uri.IsDefaultPort &&
+            string.IsNullOrEmpty(uri.UserInfo) &&
+            uri.AbsolutePath.StartsWith("/chryow/AudioProfileSwitcher/releases/download/", StringComparison.OrdinalIgnoreCase);
+
+        return valid ? uri.AbsoluteUri : null;
+    }
+
+    /// <summary>
+    /// Validates every HTTP redirect hop when downloading a release binary or SHA256SUMS.txt.
+    /// Only GitHub's own release download endpoints and CDN asset hosts over HTTPS are permitted.
+    /// </summary>
+    public static bool IsAllowedUpdateDownloadUri(Uri? uri)
+    {
+        if (uri == null || !uri.IsAbsoluteUri) return false;
+        if (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!uri.IsDefaultPort || !string.IsNullOrEmpty(uri.UserInfo)) return false;
+
+        if (uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return uri.AbsolutePath.StartsWith("/chryow/AudioProfileSwitcher/releases/download/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return uri.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase) ||
+               uri.Host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase) ||
+               uri.Host.Equals("github-releases.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -733,7 +796,177 @@ public static class ProfileLogic
         return (addedCards, addedFilters);
     }
 
-    public static ReleaseCheckResult ParseLatestRelease(string releaseJson, string currentVersion = AppInfo.Version)
+    public static string? NormalizeSha256Hex(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var span = raw.AsSpan().Trim();
+        if (span.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+            span = span[7..].Trim();
+
+        if (span.Length != 64) return null;
+        var chars = new char[64];
+        for (int i = 0; i < 64; i++)
+        {
+            char c = span[i];
+            if (c >= '0' && c <= '9') chars[i] = c;
+            else if (c >= 'a' && c <= 'f') chars[i] = c;
+            else if (c >= 'A' && c <= 'F') chars[i] = (char)(c + 32);
+            else return null;
+        }
+        return new string(chars);
+    }
+
+    /// <summary>Parses GNU sha256sum output ("&lt;64-hex&gt;  &lt;filename&gt;") and returns the normalized hash for assetName.</summary>
+    public static string? ParseSha256Sums(string? content, string assetName)
+    {
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(assetName)) return null;
+
+        var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (line.Length < 66 || line[0] == '#') continue;
+
+            int sep = 0;
+            while (sep < line.Length && !char.IsWhiteSpace(line[sep])) sep++;
+            if (sep != 64) continue;
+
+            var hash = NormalizeSha256Hex(line[..64]);
+            if (hash == null) continue;
+
+            var fileToken = line[sep..].Trim().TrimStart('*');
+            if (fileToken.StartsWith("./", StringComparison.Ordinal) || fileToken.StartsWith(".\\", StringComparison.Ordinal))
+                fileToken = fileToken[2..];
+
+            string fileNameOnly = Path.GetFileName(fileToken.Replace('\\', '/'));
+            if (fileToken.Equals(assetName, StringComparison.OrdinalIgnoreCase) ||
+                fileNameOnly.Equals(assetName, StringComparison.OrdinalIgnoreCase))
+            {
+                return hash;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Cross-checks GitHub API asset digest against SHA256SUMS.txt.
+    /// Throws InvalidDataException if both exist and disagree.
+    /// </summary>
+    public static string? ResolveExpectedSha256(string? apiDigest, string? sumsFileHash)
+    {
+        var normalizedApi = NormalizeSha256Hex(apiDigest);
+        var normalizedSums = NormalizeSha256Hex(sumsFileHash);
+
+        if (normalizedApi != null && normalizedSums != null &&
+            !normalizedApi.Equals(normalizedSums, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Release checksum mismatch between GitHub metadata and SHA256SUMS.txt.");
+        }
+
+        return normalizedSums ?? normalizedApi;
+    }
+
+    public static string FormatByteSize(long bytes)
+    {
+        if (bytes < 0) bytes = 0;
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0).ToString("0.#", CultureInfo.InvariantCulture)} KB";
+        return $"{(bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture)} MB";
+    }
+
+    public static bool IsPathStrictlyInsideDirectory(string? filePath, string? directoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || string.IsNullOrWhiteSpace(directoryPath))
+            return false;
+
+        try
+        {
+            string fullFile = Path.GetFullPath(filePath);
+            string fullDir = Path.GetFullPath(directoryPath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+
+            var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return fullFile.Length > fullDir.Length && fullFile.StartsWith(fullDir, cmp);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static string FormatReleaseNotesForDisplay(string? rawMarkdown)
+    {
+        if (string.IsNullOrWhiteSpace(rawMarkdown))
+            return "Bug fixes and improvements.";
+
+        string text = rawMarkdown.Replace("\r\n", "\n").Replace('\r', '\n');
+
+        int downloadSection = text.IndexOf("Which file should I download?", StringComparison.OrdinalIgnoreCase);
+        if (downloadSection > 0)
+        {
+            int cut = text.LastIndexOf("\n---", downloadSection, StringComparison.Ordinal);
+            text = cut > 0 ? text[..cut] : text[..downloadSection];
+        }
+
+        var sb = new StringBuilder(Math.Min(text.Length, MaxReleaseNotesLength));
+        var lines = text.Split('\n');
+        bool prevBlank = true;
+
+        foreach (var rawLine in lines)
+        {
+            string line = rawLine.Trim();
+            if (line == "---" || line == "***") continue;
+
+            if (line.Length == 0)
+            {
+                if (!prevBlank && sb.Length > 0)
+                {
+                    sb.Append("\r\n");
+                    prevBlank = true;
+                }
+                continue;
+            }
+
+            // Clean light Markdown syntax into crisp plain text for the dark release notes box.
+            while (line.StartsWith('#')) line = line[1..].TrimStart();
+            if (line.StartsWith("- ", StringComparison.Ordinal) || line.StartsWith("* ", StringComparison.Ordinal))
+                line = "• " + line[2..].TrimStart();
+            else if (line.StartsWith("> ", StringComparison.Ordinal))
+                line = line[2..].TrimStart();
+
+            line = MarkdownLinkRegex.Replace(line, "$1");
+            line = line.Replace("**", "").Replace("__", "").Replace("`", "");
+
+            var cleanLine = new StringBuilder(line.Length);
+            foreach (char ch in line)
+            {
+                if (!char.IsControl(ch)) cleanLine.Append(ch);
+            }
+
+            string finalLine = cleanLine.ToString().Trim();
+            if (finalLine.Length == 0) continue;
+
+            if (sb.Length + finalLine.Length + 2 > MaxReleaseNotesLength)
+            {
+                if (sb.Length == 0) sb.Append(finalLine.AsSpan(0, Math.Min(finalLine.Length, MaxReleaseNotesLength - 1)));
+                sb.Append('…');
+                break;
+            }
+
+            if (sb.Length > 0) sb.Append("\r\n");
+            sb.Append(finalLine);
+            prevBlank = false;
+        }
+
+        string result = sb.ToString().Trim();
+        return result.Length == 0 ? "Bug fixes and improvements." : result;
+    }
+
+    public static ReleaseCheckResult ParseLatestRelease(
+        string releaseJson,
+        string currentVersion = AppInfo.Version,
+        string? preferredAssetName = null)
     {
         if (Encoding.UTF8.GetByteCount(releaseJson) > MaxUpdateResponseBytes)
             throw new InvalidDataException("Update metadata response exceeded size limit.");
@@ -741,10 +974,72 @@ public static class ProfileLogic
         using var doc = JsonDocument.Parse(releaseJson);
         var root = doc.RootElement;
 
-        string rawTag = root.TryGetProperty("tag_name", out var tagProp) ? (tagProp.GetString() ?? "") : "";
+        string rawTag = root.TryGetProperty("tag_name", out var tagProp) && tagProp.ValueKind == JsonValueKind.String
+            ? (tagProp.GetString() ?? "")
+            : "";
         string tag = SanitizeDisplayString(rawTag, 32, "");
-        string rawUrl = root.TryGetProperty("html_url", out var urlProp) ? (urlProp.GetString() ?? "") : "";
+
+        string rawUrl = root.TryGetProperty("html_url", out var urlProp) && urlProp.ValueKind == JsonValueKind.String
+            ? (urlProp.GetString() ?? "")
+            : "";
         string url = SanitizeReleaseUrl(rawUrl);
+
+        string? rawBody = root.TryGetProperty("body", out var bodyProp) && bodyProp.ValueKind == JsonValueKind.String
+            ? bodyProp.GetString()
+            : null;
+        string notes = FormatReleaseNotesForDisplay(rawBody);
+
+        string targetAsset = string.IsNullOrWhiteSpace(preferredAssetName)
+            ? AppInfo.PreferredAssetName
+            : preferredAssetName;
+
+        string? matchedAssetName = null;
+        string? matchedAssetUrl = null;
+        long matchedAssetSize = 0;
+        string? matchedAssetSha256 = null;
+        string? checksumsUrl = null;
+
+        if (root.TryGetProperty("assets", out var assetsProp) && assetsProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var asset in assetsProp.EnumerateArray())
+            {
+                if (asset.ValueKind != JsonValueKind.Object) continue;
+                string? name = asset.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String
+                    ? nameProp.GetString()
+                    : null;
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                string? rawDownload = asset.TryGetProperty("browser_download_url", out var dlProp) && dlProp.ValueKind == JsonValueKind.String
+                    ? dlProp.GetString()
+                    : null;
+                string? safeDownload = SanitizeReleaseAssetUrl(rawDownload);
+                if (safeDownload == null) continue;
+
+                if (name.Equals(AppInfo.ChecksumsAssetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    checksumsUrl = safeDownload;
+                    continue;
+                }
+
+                if (name.Equals(targetAsset, StringComparison.OrdinalIgnoreCase))
+                {
+                    long size = asset.TryGetProperty("size", out var sizeProp) && sizeProp.TryGetInt64(out var parsedSize)
+                        ? parsedSize
+                        : 0;
+                    if (size > 0 && (size < MinUpdateBinaryBytes || size > MaxUpdateBinaryBytes))
+                        continue;
+
+                    string? rawDigest = asset.TryGetProperty("digest", out var digestProp) && digestProp.ValueKind == JsonValueKind.String
+                        ? digestProp.GetString()
+                        : null;
+
+                    matchedAssetName = name;
+                    matchedAssetUrl = safeDownload;
+                    matchedAssetSize = size;
+                    matchedAssetSha256 = NormalizeSha256Hex(rawDigest);
+                }
+            }
+        }
 
         string cleanLatest = tag.Trim().TrimStart('v', 'V');
         string cleanCurrent = currentVersion.Trim().TrimStart('v', 'V');
@@ -754,13 +1049,24 @@ public static class ProfileLogic
         int dashCurrent = cleanCurrent.IndexOf('-');
         if (dashCurrent > 0) cleanCurrent = cleanCurrent[..dashCurrent];
 
-        if (Version.TryParse(cleanLatest, out var latestVer) &&
-            Version.TryParse(cleanCurrent, out var curVer))
-        {
-            return new ReleaseCheckResult(latestVer > curVer, string.IsNullOrEmpty(tag) ? $"v{latestVer}" : tag, url);
-        }
+        bool updateAvailable = Version.TryParse(cleanLatest, out var latestVer) &&
+                               Version.TryParse(cleanCurrent, out var curVer) &&
+                               latestVer > curVer;
 
-        return new ReleaseCheckResult(false, string.IsNullOrEmpty(tag) ? $"v{currentVersion}" : tag, url);
+        string displayVersion = !string.IsNullOrEmpty(tag)
+            ? tag
+            : (Version.TryParse(cleanLatest, out var fallbackLatest) ? $"v{fallbackLatest}" : $"v{currentVersion}");
+
+        return new ReleaseCheckResult(
+            updateAvailable,
+            displayVersion,
+            url,
+            matchedAssetName,
+            matchedAssetUrl,
+            matchedAssetSize,
+            matchedAssetSha256,
+            checksumsUrl,
+            notes);
     }
 
     // ---- Offline Voice Control helpers ------------------------------------------------------

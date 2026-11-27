@@ -19,23 +19,50 @@ static class Program
             e.SetObserved();
         };
 
+        // Internal one-shot self-update applier (strictly restricted to %AppData%\AudioProfileSwitcher\updates\).
+        if (args.Any(a => a.Equals("--apply-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            UpdateService.RunApplyUpdateMode();
+            return;
+        }
+
+        string? updatedToVersion = null;
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i].Equals("--updated-to", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedToVersion = ProfileLogic.SanitizeDisplayString(args[i + 1], 32, "");
+                if (updatedToVersion.Length == 0) updatedToVersion = null;
+                break;
+            }
+        }
+
         // Single instance: a second launch just asks the first one to show its window.
         using var mutex = new Mutex(true, @"Local\AudioProfileSwitcher.Instance", out bool isFirst);
         using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\AudioProfileSwitcher.Show");
+        if (!isFirst && updatedToVersion != null)
+        {
+            try { isFirst = mutex.WaitOne(5000); }
+            catch (AbandonedMutexException) { isFirst = true; }
+        }
         if (!isFirst)
         {
             showEvent.Set();
             return;
         }
 
-        AppLog.Info("AudioProfileSwitcher starting.");
+        AppLog.Info($"AudioProfileSwitcher v{AppInfo.Version} ({AppInfo.BuildFlavorLabel}) starting.");
+        UpdateService.CleanupStagedUpdatesAsync();
 
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
         bool startMinimized = args.Contains("--minimized", StringComparer.OrdinalIgnoreCase);
-        var form = new MainForm(startMinimized);
+        var form = new MainForm(startMinimized, updatedToVersion);
 
         var listener = new Thread(() =>
         {

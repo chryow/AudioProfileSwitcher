@@ -30,7 +30,7 @@ Built so you can walk away from your desk and keep talking to your friends on Di
 | **Offline Voice Control (Pinned Mic)** | ✅ Keep Bluetooth stereo | ❌ | ❌ |
 | **Interactive / Draggable `MIC MUTED` Pill** | ✅ Click-through or drag | ❌ | ❌ |
 | **Auto-Activate & Disconnect Fallback** | ✅ Re-links renamed USB/BT | ⚠️ Basic | ❌ |
-| **Zero-Install Portable Single `.exe`** | ✅ ~1.4 MB (or standalone) | ❌ Installer | Built-in |
+| **Zero-Install Portable Single `.exe` + 1-Click Self-Updater** | ✅ ~1.4 MB (SHA-256 verified) | ❌ Installer | Built-in |
 | **Modern Dark Obsidian UI + Glassy OSD** | ✅ Native Win11 look | ⚠️ Classic | ⚠️ Multi-click |
 
 ---
@@ -39,10 +39,11 @@ Built so you can walk away from your desk and keep talking to your friends on Di
 
 - **Profile Cards (Output + Input + Communications + Volumes)** — Pair any combination of playback device, microphone, optional separate communications output, and target output/mic volumes into visual cards. Reorder cards, duplicate presets, or jump directly with `Ctrl + Shift + 1–9`.
 - **Offline Voice Control (`System.Speech` + `NAudio.Wasapi`)** — Hands-free switching completely offline with zero cloud APIs. Pin a desk/USB microphone as your **Listening Microphone** so Bluetooth headsets stay in full A2DP stereo quality instead of dropping into hands-free mode.
+- **One-Click Self-Updater (SHA-256 Verified)** — Silently checks GitHub Releases on startup (toggleable), surfaces a clickable `↑ vX.Y.Z` title-bar pill & tray menu shortcut, automatically downloads the matching Lightweight or Standalone build with live progress, verifies its SHA-256 checksum against `SHA256SUMS.txt` & release metadata, swaps the `.exe` cleanly, and relaunches while preserving all profiles and startup shortcuts.
 - **Global Hotkeys & System Tray** — Rebindable global hotkeys for **Cycle Cards**, **Cycle Output**, **Cycle Input**, **Toggle Mic Mute**, and **Show / Hide Window** (`Ctrl + Shift + Space`), plus a fast right-click tray menu with direct device switching.
 - **Smart Auto-Activate & Disconnect Fallback** — Automatically switch to a headset card when it powers on, fall back to your previous or designated speakers card when it disconnects, and auto-relink devices by name if Windows reassigns USB/Bluetooth GUIDs.
 - **Smooth Floating Overlays & Audio Chimes** — Fade-animated glassy OSD switch toasts, synthesized switch/mute chimes, and a persistent `● MIC MUTED` overlay pill (click-through for games, or interactive to drag anywhere and click to unmute).
-- **Native CoreAudio Architecture** — Powered by `NAudio.Wasapi` + native `IPolicyConfig` COM interop with lock-free `IMMNotificationClient` & endpoint mute callbacks, System32-pinned P/Invokes, portable JSON Import/Export, and built-in GitHub Release update checking.
+- **Native CoreAudio Architecture** — Powered by `NAudio.Wasapi` + native `IPolicyConfig` COM interop with lock-free `IMMNotificationClient` & endpoint mute callbacks, System32-pinned P/Invokes, and portable JSON profile Import/Export.
 
 ---
 
